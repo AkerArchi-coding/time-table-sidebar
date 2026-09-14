@@ -24,20 +24,13 @@ on:
 permissions:
   contents: write
 
+# 注意：不能用 matrix + job 级 if 过滤——job 的 if 求值时 matrix 上下文
+# 尚不存在（Unrecognized named-value: 'matrix'），所以拆成两个独立 job。
 jobs:
-  build-mac:
-    name: 打包 dmg (${{ matrix.arch }})
+  build-arm64:
+    name: 打包 dmg (arm64 / Apple 芯片)
+    if: github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm64'
     runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-          - arch: x64
-    # 手动运行且只选了单架构时，跳过另一个。
-    # 注意：必须用 github.event.inputs 而非 inputs——后者在 push 事件下是
-    # 未定义上下文，会导致整个工作流校验失败、0 job 秒退。
-    if: github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -48,19 +41,55 @@ jobs:
           node-version: 22
 
       # koffi 的原生二进制按架构作为可选依赖分发（@koromix/koffi-darwin-*），
-      # 因此必须显式指定目标架构安装，交叉打出的 x64 包才不会缺原生模块
-      - name: 安装依赖（darwin/${{ matrix.arch }}）
-        run: npm install --no-save --os=darwin --cpu=${{ matrix.arch }}
+      # 因此必须显式指定目标架构安装，交叉打出的包才不会缺原生模块
+      - name: 安装依赖（darwin/arm64）
+        run: npm install --no-save --os=darwin --cpu=arm64
 
       - name: 生成 dmg（不签名）
-        run: ./node_modules/.bin/electron-builder --mac dmg --${{ matrix.arch }}
+        run: ./node_modules/.bin/electron-builder --mac dmg --arm64
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: 上传构建产物（Actions 页面可下载，保留 14 天）
         uses: actions/upload-artifact@v4
         with:
-          name: 日程侧边栏-mac-${{ matrix.arch }}
+          name: 日程侧边栏-mac-arm64
+          path: dist/*.dmg
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 附加到 GitHub Release（仅 v* 标签触发时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
+
+  build-x64:
+    name: 打包 dmg (x64 / Intel 芯片)
+    if: github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == 'x64'
+    runs-on: macos-14
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装依赖（darwin/x64）
+        run: npm install --no-save --os=darwin --cpu=x64
+
+      - name: 生成 dmg（不签名）
+        run: ./node_modules/.bin/electron-builder --mac dmg --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 上传构建产物（Actions 页面可下载，保留 14 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 日程侧边栏-mac-x64
           path: dist/*.dmg
           retention-days: 14
           if-no-files-found: error
