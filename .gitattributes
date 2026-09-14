@@ -1,0 +1,8 @@
+# 统一文本文件换行符为 LF（build-mac.sh 等脚本在 macOS bash 下遇到 CRLF 会报错）
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.ico binary
+*.png binary
+*.dmg binary
+*.exe binary
