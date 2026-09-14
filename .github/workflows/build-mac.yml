@@ -7,10 +7,13 @@ name: 构建 macOS 安装包
 #  2. 标签：推送 v 开头的标签（如 v0.1.0）自动构建并发布 Release
 #
 #  架构说明（踩坑结论）：
-#  - arm64 包在 macos-14（Apple 芯片）上原生构建
-#  - x64 包必须在 macos-13（Intel 芯片）上原生构建：
-#    曾尝试在 arm64 runner 上用 `npm install --cpu=x64` 交叉安装，
-#    koffi 的安装脚本忽略 cpu 参数回退源码编译，链接失败。
+#  - 两个包都在 macos-14（Apple 芯片）runner 上构建
+#  - x64 包通过 Rosetta 运行 x64 版 Node：整条 npm/electron-builder
+#    工具链以 x64 原生执行，koffi 装到 @koromix/koffi-darwin-x64
+#    预编译包，不发生交叉编译。
+#  - 曾尝试方案①macos-13 Intel runner（排队 20+ 分钟不可用）；
+#    方案②npm install --cpu=x64（koffi 安装脚本忽略 cpu 参数，
+#    回退源码编译链接失败）。均废弃。
 #  - electron-builder 必须带 --publish never，否则它在 CI 中
 #    隐式触发 GitHub 发布并因缺少 GH_TOKEN 而失败。
 # ============================================================
@@ -72,17 +75,32 @@ jobs:
   build-x64:
     name: 打包 dmg (x64 / Intel 芯片)
     if: github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == 'x64'
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: 安装 Node.js
+      # 先用 setup-node 确定一个具体的 Node 22 版本号
+      - name: 安装 Node.js（arm64，仅用于取版本）
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: 安装依赖（Intel 原生）
+      # 下载同版本 x64 Node，后续步骤全部经 Rosetta 跑 x64 工具链
+      - name: 切换为 x64 Node（Rosetta）
+        run: |
+          set -e
+          NVER="$(node -v | sed 's/^v//')"
+          echo "下载 Node v${NVER} darwin-x64 …"
+          curl -fsSL "https://nodejs.org/dist/v${NVER}/node-v${NVER}-darwin-x64.tar.gz" -o /tmp/node-x64.tgz
+          mkdir -p "$HOME/node-x64"
+          tar -xzf /tmp/node-x64.tgz -C "$HOME/node-x64" --strip-components=1
+          echo "$HOME/node-x64/bin" >> "$GITHUB_PATH"
+
+      - name: 确认运行架构
+        run: node -p "'Node: ' + process.version + '  arch=' + process.arch"
+
+      - name: 安装依赖（x64 原生）
         run: npm install
 
       - name: 生成 dmg（不签名、不发布）
