@@ -34,8 +34,10 @@ jobs:
         include:
           - arch: arm64
           - arch: x64
-    # 手动运行且只选了单架构时，跳过另一个
-    if: github.event_name == 'push' || inputs.arch == 'both' || inputs.arch == matrix.arch
+    # 手动运行且只选了单架构时，跳过另一个。
+    # 注意：必须用 github.event.inputs 而非 inputs——后者在 push 事件下是
+    # 未定义上下文，会导致整个工作流校验失败、0 job 秒退。
+    if: github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
