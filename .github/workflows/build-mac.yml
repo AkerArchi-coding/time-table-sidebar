@@ -1,0 +1,71 @@
+name: 构建 macOS 安装包
+
+# ============================================================
+#  两种触发方式：
+#  1. 手动：GitHub 仓库页面 → Actions → "构建 macOS 安装包"
+#     → Run workflow，可选 arm64 / x64 / 两个都打
+#  2. 标签：推送 v 开头的标签（如 v0.1.0）自动构建并发布 Release
+# ============================================================
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 目标架构（M1/M2/M3/M4 选 arm64，Intel 选 x64，不确定选 both）
+        type: choice
+        options:
+          - both
+          - arm64
+          - x64
+        default: both
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    name: 打包 dmg (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+          - arch: x64
+    # 手动运行且只选了单架构时，跳过另一个
+    if: github.event_name == 'push' || inputs.arch == 'both' || inputs.arch == matrix.arch
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # koffi 的原生二进制按架构作为可选依赖分发（@koromix/koffi-darwin-*），
+      # 因此必须显式指定目标架构安装，交叉打出的 x64 包才不会缺原生模块
+      - name: 安装依赖（darwin/${{ matrix.arch }}）
+        run: npm install --no-save --os=darwin --cpu=${{ matrix.arch }}
+
+      - name: 生成 dmg（不签名）
+        run: ./node_modules/.bin/electron-builder --mac dmg --${{ matrix.arch }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 上传构建产物（Actions 页面可下载，保留 14 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 日程侧边栏-mac-${{ matrix.arch }}
+          path: dist/*.dmg
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 附加到 GitHub Release（仅 v* 标签触发时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true

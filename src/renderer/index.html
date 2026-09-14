@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>桌面日程表</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="sidebar" class="collapsed">
+    <!-- 收起态窄条：导航图标 + 时钟日期 + 工具图标（底部） -->
+    <div id="rail">
+      <div class="rail-group" id="railNav">
+        <button class="rail-icon" data-view="today" title="今日"><span>🏠</span></button>
+        <button class="rail-icon" data-view="projects" title="项目"><span>📁</span></button>
+        <button class="rail-icon" data-view="tasks" title="事项"><span>✓</span></button>
+        <button class="rail-icon" data-view="calendar" title="日历"><span>📅</span></button>
+      </div>
+      <div class="rail-sep"></div>
+      <div class="rail-clock">
+        <div class="rail-time" id="railTime">--:--</div>
+        <div class="rail-date" id="railDate">--</div>
+      </div>
+      <div class="rail-spacer"></div>
+      <div class="rail-group" id="railToolsMid">
+        <button class="rail-icon" data-tool="quickadd" title="快速添加"><span>＋</span></button>
+        <button class="rail-icon" data-tool="notes" title="快速便签"><span>📝</span></button>
+      </div>
+      <div class="rail-spacer"></div>
+      <div class="rail-group" id="railToolsWork">
+        <button class="rail-icon" data-tool="pomodoro" title="番茄钟"><span>⏱</span><i class="rail-dot hidden"></i></button>
+        <button class="rail-icon" data-tool="progress" title="今日进度"><span>◔</span></button>
+      </div>
+      <div class="rail-sep"></div>
+      <div class="rail-group" id="railToolsDesktop">
+        <button class="rail-icon" data-tool="weather" title="天气"><span class="ri-ico">☀️</span><em class="rail-sub" id="railWeatherSub">--°</em></button>
+        <button class="rail-icon" data-tool="sys" title="系统资源"><span class="ri-ico">▣</span><em class="rail-sub" id="railSysSub">--%</em></button>
+        <button class="rail-icon" data-tool="clipboard" title="剪贴板"><span class="ri-ico">📋</span></button>
+      </div>
+    </div>
+
+    <!-- 展开态：多视图面板 -->
+    <div id="panel">
+      <!-- 视图导航 -->
+      <nav class="view-tabs" id="viewTabs">
+        <button data-view="today" class="active">今日</button>
+        <button data-view="projects">项目</button>
+        <button data-view="tasks">事项</button>
+        <button data-view="calendar">日历</button>
+      </nav>
+
+      <!-- 侧边栏工具条（工作工具 + 桌面工具） -->
+      <div class="tool-strip" id="toolStrip">
+        <button class="strip-btn" data-tool="quickadd" title="快速添加"><span class="strip-ico">＋</span><span class="strip-label">快加</span></button>
+        <button class="strip-btn" data-tool="pomodoro" title="番茄钟"><span class="strip-ico">⏱</span><span class="strip-label">番茄钟</span></button>
+        <button class="strip-btn" data-tool="progress" title="今日进度"><span class="strip-ico">◔</span><span class="strip-label">进度</span></button>
+        <button class="strip-btn" data-tool="notes" title="快速便签"><span class="strip-ico">📝</span><span class="strip-label">便签</span></button>
+        <span class="strip-sep"></span>
+        <button class="strip-btn" data-tool="weather" title="天气"><span class="strip-ico">☀️</span><span class="strip-label">天气</span></button>
+        <button class="strip-btn" data-tool="sys" title="系统资源"><span class="strip-ico">▣</span><span class="strip-label">资源</span></button>
+        <button class="strip-btn" data-tool="clipboard" title="剪贴板"><span class="strip-ico">📋</span><span class="strip-label">剪贴板</span></button>
+      </div>
+
+      <header class="panel-header">
+        <div>
+          <div class="big-date" id="bigDate">--</div>
+          <div class="big-weekday" id="bigWeekday">--</div>
+        </div>
+        <div class="header-actions" id="headerActions">
+          <button id="prevWeek" class="nav-btn" title="上一周">‹</button>
+          <button id="nextWeek" class="nav-btn" title="下一周">›</button>
+        </div>
+      </header>
+
+      <!-- 视图容器（今日/项目/事项/日历 共用，JS 动态填充） -->
+      <section id="weekList" class="view-container"></section>
+    </div>
+  </div>
+
+  <!-- 右键上下文菜单（四种模式：空白 / 事项 / 项目 / 日期选择 / 项目选择） -->
+  <div id="ctxMenu" class="ctx-menu hidden">
+    <!-- 菜单项列表（动态填充） -->
+    <div id="ctxItems" class="ctx-items"></div>
+    <!-- 日期选择面板 -->
+    <div id="ctxDatePicker" class="ctx-date-picker hidden">
+      <div class="dp-label" id="dpLabel">选择日期</div>
+      <input type="date" id="dpInput" class="dp-input" />
+      <div class="dp-actions">
+        <button id="dpConfirm" class="dp-btn primary">确认</button>
+        <button id="dpCancel" class="dp-btn">取消</button>
+      </div>
+    </div>
+    <!-- 项目选择面板（"调整事项到项目"用） -->
+    <div id="ctxProjectPicker" class="ctx-project-picker hidden">
+      <div class="pp-label" id="ppLabel">选择项目</div>
+      <div id="ppList" class="pp-list"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
