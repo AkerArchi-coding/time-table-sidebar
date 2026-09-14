@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, dialog, clipboard, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,6 +12,8 @@ let leaveTimer = null;         // 收回延迟计时器
 let edgeDwellTimer = null;     // 收起态：鼠标在边缘条带的停留计时器（防误触）
 let fullscreenHidden = false;  // 是否因前台全屏而隐藏
 let editing = false;           // 渲染层正在编辑表单（阻止自动收回）
+let tray = null;               // 系统托盘
+let uiConfig = { side: 'right', mode: 'rail' };  // 侧边栏 UI 配置：停靠侧 + 显示模式（持久化）
 
 const NARROW_W = 64;           // 收起时宽度
 const EXPANDED_W = 360;        // 展开时宽度
@@ -109,23 +111,86 @@ function startFullscreenCheck() {
       if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
       sidebar.hide();
     } else if (!isFs && fullscreenHidden) {
-      // 退出全屏 → 恢复
+      // 退出全屏 → 恢复（hidden 模式下保持隐藏，不强制显示）
       fullscreenHidden = false;
       collapseSidebar(true);
-      sidebar.show();
+      if (uiConfig.mode !== 'hidden' && !sidebar.isVisible()) sidebar.showInactive();
     }
   }, FS_CHECK_INTERVAL);
 }
 
+// ============ 侧边栏 UI 配置（停靠侧 / 显示模式；持久化于 userData） ============
+function uiConfigPath() {
+  return path.join(app.getPath('userData'), 'sidebar-ui.json');
+}
+function loadUiConfig() {
+  try {
+    const o = JSON.parse(fs.readFileSync(uiConfigPath(), 'utf8'));
+    if (o.side === 'left' || o.side === 'right') uiConfig.side = o.side;
+    if (o.mode === 'rail' || o.mode === 'mini' || o.mode === 'hidden') uiConfig.mode = o.mode;
+  } catch { /* 首次运行或文件损坏 → 保持默认 */ }
+}
+function saveUiConfig() {
+  try { fs.writeFileSync(uiConfigPath(), JSON.stringify(uiConfig), 'utf8'); } catch { /* 写盘失败下次再试 */ }
+}
+
+// 收起态几何：rail = 全高窄条；mini = 半高窄条（垂直居中，Dock 感）
+function collapsedRect() {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - NARROW_W;
+  if (uiConfig.mode === 'mini') {
+    const h = Math.floor(wa.height / 2);
+    return { x, y: wa.y + Math.floor((wa.height - h) / 2), width: NARROW_W, height: h };
+  }
+  return { x, y: wa.y, width: NARROW_W, height: wa.height };
+}
+// 展开态几何：全高面板，贴靠当前停靠侧
+function expandedRect() {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - EXPANDED_W;
+  return { x, y: wa.y, width: EXPANDED_W, height: wa.height };
+}
+
+function sendStateChange() {
+  if (sidebar && !sidebar.isDestroyed()) {
+    sidebar.webContents.send('state-change', {
+      expanded,
+      side: uiConfig.side,
+      mode: uiConfig.mode
+    });
+  }
+}
+
+// 配置变更后重排几何与可见性（设置面板 / 启动恢复共用）
+function applyUiConfig() {
+  if (!sidebar || sidebar.isDestroyed()) return;
+  if (expanded) {
+    expandSidebar();          // 展开中仅换边/换模式，保持展开
+  } else {
+    collapseSidebar(true);
+    if (uiConfig.mode !== 'hidden' && !sidebar.isVisible()) sidebar.showInactive();
+  }
+  sendStateChange();
+}
+
+ipcMain.handle('ui-config-get', () => Object.assign({}, uiConfig));
+ipcMain.on('ui-config-set', (_e, partial) => {
+  if (!partial || typeof partial !== 'object') return;
+  if (partial.side === 'left' || partial.side === 'right') uiConfig.side = partial.side;
+  if (partial.mode === 'rail' || partial.mode === 'mini' || partial.mode === 'hidden') uiConfig.mode = partial.mode;
+  saveUiConfig();
+  applyUiConfig();
+});
+
 // ============ 侧边栏窗口 ============
 function createSidebar() {
-  const wa = screen.getPrimaryDisplay().workArea;
+  const start = collapsedRect();
 
   sidebar = new BrowserWindow({
-    width: NARROW_W,
-    height: wa.height,
-    x: wa.x + wa.width - NARROW_W,
-    y: wa.y,
+    width: start.width,
+    height: start.height,
+    x: start.x,
+    y: start.y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -151,27 +216,32 @@ function createSidebar() {
 
   setInterval(checkCursor, POLL_INTERVAL);
 
-  // 阻止用户误关闭（侧边栏常驻）
+  // 关闭窗口 → 隐藏进托盘（托盘左键/菜单可再次唤起；真正退出走托盘"退出"）
   sidebar.on('close', (e) => {
     if (app.isQuiting) return;
     e.preventDefault();
+    sidebar.hide();
   });
 }
 
-// 判断点是否位于屏幕最右缘的触发条带（工作区内）
+// 判断点是否位于停靠侧屏幕边缘的触发条带（工作区内）
 function pointNearEdge(pt) {
   const display = screen.getDisplayNearestPoint(pt);
   const wa = display.workArea;
+  if (pt.y < wa.y || pt.y > wa.y + wa.height) return false;
+  if (uiConfig.side === 'left') {
+    return pt.x >= wa.x && pt.x <= wa.x + TRIGGER_MARGIN;
+  }
   const rightEdge = wa.x + wa.width;
-  return pt.x >= rightEdge - TRIGGER_MARGIN && pt.x <= rightEdge &&
-         pt.y >= wa.y && pt.y <= wa.y + wa.height;
+  return pt.x >= rightEdge - TRIGGER_MARGIN && pt.x <= rightEdge;
 }
 
 // 轮询鼠标位置，判断是否需要展开/收回
 function checkCursor() {
   if (!sidebar || sidebar.isDestroyed()) return;
   if (fullscreenHidden) return;       // 全屏隐藏期间不响应鼠标
-  if (!sidebar.isVisible()) return;    // 窗口不可见时不响应
+  // hidden 模式下窗口不可见也继续轮询（贴边停留唤出）；其余模式不可见即跳过
+  if (!sidebar.isVisible() && uiConfig.mode !== 'hidden') return;
 
   const pt = screen.getCursorScreenPoint();
 
@@ -197,14 +267,17 @@ function checkCursor() {
       }, COLLAPSE_DELAY);
     }
   } else {
-    // 收起态：只在最右缘 6px 条带内停留 EDGE_DWELL_MS 才展开；
-    // 不再用 inWindow（收起窗口占 64px，会让整个窄条都变成零延迟触发区）。
+    // 收起态：只在停靠侧边缘 6px 条带内停留 EDGE_DWELL_MS 才展开（防误触）。
+    // hidden 模式窗口不可见时同样生效：先 showInactive（不抢焦点）再展开。
     if (pointNearEdge(pt)) {
       if (!edgeDwellTimer) {
         edgeDwellTimer = setTimeout(() => {
           edgeDwellTimer = null;
           const p = screen.getCursorScreenPoint();
-          if (!expanded && pointNearEdge(p)) expandSidebar();
+          if (!expanded && pointNearEdge(p)) {
+            if (!sidebar.isVisible()) sidebar.showInactive();
+            expandSidebar();
+          }
         }, EDGE_DWELL_MS);
       }
     } else if (edgeDwellTimer) {
@@ -399,60 +472,189 @@ ipcMain.handle('sys-stats', async () => {
   };
 });
 
-// ============ 剪贴板历史（主进程轮询，去重，推送给渲染层） ============
+// ============ 剪贴板历史（主进程轮询，去重，推送给渲染层；本地持久化） ============
 const CLIP_MAX = 30;
 const clipHistory = [];
+let clipEnabled = true;        // 渲染层"剪贴板历史"开关（关闭 = 暂停记录，不清空历史）
+let clipSaveTimer = null;
+
+function clipStorePath() {
+  return path.join(app.getPath('userData'), 'clipboard-history.json');
+}
+
+// 启动时从磁盘恢复历史（仅文本；坏文件静默忽略）
+function loadClipHistory() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(clipStorePath(), 'utf8'));
+    if (Array.isArray(arr)) {
+      for (const t of arr) {
+        if (typeof t === 'string' && t.trim()) clipHistory.push(t);
+      }
+      if (clipHistory.length > CLIP_MAX) clipHistory.length = CLIP_MAX;
+    }
+  } catch { /* 首次运行或文件损坏 → 从空开始 */ }
+}
+
+// 防抖写盘：剪贴板内容仅保存在本机，不写任何日志
+function persistClip() {
+  if (clipSaveTimer) clearTimeout(clipSaveTimer);
+  clipSaveTimer = setTimeout(() => {
+    clipSaveTimer = null;
+    try {
+      fs.writeFileSync(clipStorePath(), JSON.stringify(clipHistory), 'utf8');
+    } catch { /* 写盘失败不影响运行，下次变更再试 */ }
+  }, 800);
+}
+
 function broadcastClipboard() {
   if (sidebar && !sidebar.isDestroyed()) {
     sidebar.webContents.send('clipboard-update', clipHistory.slice());
   }
 }
-setInterval(() => {
-  let text;
-  try { text = clipboard.readText(); } catch { return; }
-  if (typeof text !== 'string') return;         // 非文本剪贴板内容（如复制文件）→ 忽略
-  text = text.replace(/\r\n/g, '\n').trim();
-  if (!text) return;
-  if (clipHistory[0] === text) return;          // 与最新一条相同（含自己回填）→ 忽略
-  const idx = clipHistory.indexOf(text);        // 重复项提到最前
-  if (idx >= 0) clipHistory.splice(idx, 1);
-  clipHistory.unshift(text);
-  if (clipHistory.length > CLIP_MAX) clipHistory.length = CLIP_MAX;
-  broadcastClipboard();
-}, 1000);
+
+// Electron 44 起 clipboard 模块改为 W3C 风格异步 API：readText()/writeText() 返回 Promise，
+// 且移除了同步版本。旧版 Electron 的 readText() 同步返回字符串（await 字符串结果幂等），
+// 故统一用 async/await，一套代码兼容新旧版本。
+async function readClipboardText() {
+  return await clipboard.readText();
+}
+
+let clipReading = false;   // 异步读取串行化：上一次未返回时跳过本轮，避免并发乱序
+async function pollClipboard() {
+  if (!clipEnabled) return;                     // 开关关闭 → 暂停记录
+  if (clipReading) return;
+  clipReading = true;
+  try {
+    let text;
+    try { text = await readClipboardText(); } catch { return; }
+    if (typeof text !== 'string') return;       // 非文本剪贴板内容（如复制文件）→ 忽略
+    text = text.replace(/\r\n/g, '\n').trim();
+    if (!text) return;
+    if (clipHistory[0] === text) return;        // 与最新一条相同（含自己回填）→ 忽略
+    const idx = clipHistory.indexOf(text);      // 重复项提到最前
+    if (idx >= 0) clipHistory.splice(idx, 1);
+    clipHistory.unshift(text);
+    if (clipHistory.length > CLIP_MAX) clipHistory.length = CLIP_MAX;
+    broadcastClipboard();
+    persistClip();
+  } finally {
+    clipReading = false;
+  }
+}
+
 ipcMain.handle('clipboard-list', () => clipHistory.slice());
 ipcMain.on('clipboard-copy', (_e, text) => {
-  try { clipboard.writeText(String(text)); } catch { /* 忽略 */ }
+  // Electron 44 起 writeText 返回 Promise；Promise.resolve 同时兼容旧版同步实现
+  Promise.resolve(clipboard.writeText(String(text))).catch(() => { /* 写入失败忽略 */ });
 });
 ipcMain.on('clipboard-clear', () => {
   clipHistory.length = 0;
   broadcastClipboard();
+  persistClip();
 });
+// 删除单条（历史内文本唯一，按文本定位）
+ipcMain.on('clipboard-delete', (_e, text) => {
+  const i = clipHistory.indexOf(String(text));
+  if (i >= 0) {
+    clipHistory.splice(i, 1);
+    broadcastClipboard();
+    persistClip();
+  }
+});
+// 开关同步（渲染层设置面板）
+ipcMain.on('clipboard-enabled', (_e, on) => {
+  clipEnabled = !!on;
+});
+
+// ============ 开机自动启动（Windows: Run 注册表 / macOS: 登录项；UI 与平台解耦） ============
+ipcMain.handle('autostart-get', () => {
+  try { return app.getLoginItemSettings().openAtLogin; } catch { return false; }
+});
+ipcMain.on('autostart-set', (_e, on) => {
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: !!on,
+      openAsHidden: !!on,          // 仅 macOS 生效，Windows 自动忽略
+      path: process.execPath,
+      args: []
+    });
+  } catch { /* 个别环境（便携目录权限等）设置失败时静默 */ }
+});
+
+// ============ 系统托盘 ============
+function createTray() {
+  let icon = nativeImage.createEmpty();
+  const iconPath = path.join(__dirname, 'assets', 'tray.png');
+  try {
+    if (fs.existsSync(iconPath)) icon = nativeImage.createFromPath(iconPath);
+  } catch { /* 图标缺失时用空图，托盘仍可用 */ }
+
+  tray = new Tray(icon);
+  tray.setToolTip('日程侧边栏');
+
+  const menu = Menu.buildFromTemplate([
+    { label: '显示 / 收起侧边栏', click: toggleSidebarFromTray },
+    { label: '设置', click: openSettingsFromTray },
+    { type: 'separator' },
+    { label: '退出', click: quitApp }
+  ]);
+  tray.setContextMenu(menu);
+
+  // Windows：左键 = 唤起/收起；macOS 设置了右键菜单后左键即弹菜单（平台差异，菜单项可用）
+  tray.on('click', toggleSidebarFromTray);
+}
+
+// 托盘左键 / 菜单"显示"：隐藏时唤起（hidden 模式直接展开），可见时展开/收起切换（编辑态不收回，保护表单）
+function toggleSidebarFromTray() {
+  if (!sidebar || sidebar.isDestroyed()) return;
+  if (fullscreenHidden) {
+    fullscreenHidden = false;
+    collapseSidebar(true);
+    if (uiConfig.mode !== 'hidden') sidebar.showInactive();
+    return;
+  }
+  if (!sidebar.isVisible()) {
+    if (uiConfig.mode === 'hidden') { sidebar.show(); expandSidebar(); return; }
+    sidebar.show();
+    return;
+  }
+  if (expanded) {
+    if (editing) return;
+    collapseSidebar(false);
+  } else {
+    expandSidebar();
+  }
+}
+
+// 托盘菜单"设置"：展开侧栏并打开设置工具
+function openSettingsFromTray() {
+  if (!sidebar || sidebar.isDestroyed()) return;
+  fullscreenHidden = false;
+  sidebar.show();
+  expandSidebar();
+  sidebar.webContents.send('tray-action', { action: 'settings' });
+}
+
+// 托盘菜单"退出"：真正结束进程（close 钩子对 isQuiting 放行）
+function quitApp() {
+  app.isQuiting = true;
+  app.quit();
+}
 
 function expandSidebar() {
   expanded = true;
   if (edgeDwellTimer) { clearTimeout(edgeDwellTimer); edgeDwellTimer = null; }
-  const wa = screen.getPrimaryDisplay().workArea;
-  sidebar.setBounds({
-    x: wa.x + wa.width - EXPANDED_W,
-    y: wa.y,
-    width: EXPANDED_W,
-    height: wa.height
-  });
-  sidebar.webContents.send('state-change', { expanded: true });
+  sidebar.setBounds(expandedRect());
+  sendStateChange();
 }
 
 // silent=true 表示仅复位几何/状态，不发送 IPC
 function collapseSidebar(silent) {
   expanded = false;
-  const wa = screen.getPrimaryDisplay().workArea;
-  sidebar.setBounds({
-    x: wa.x + wa.width - NARROW_W,
-    y: wa.y,
-    width: NARROW_W,
-    height: wa.height
-  });
-  if (!silent) sidebar.webContents.send('state-change', { expanded: false });
+  sidebar.setBounds(collapsedRect());
+  if (!silent) sendStateChange();
+  // hidden 模式：收起即整体隐藏，靠贴边停留或托盘再次唤出
+  if (uiConfig.mode === 'hidden' && sidebar.isVisible()) sidebar.hide();
 }
 
 // ============ App 生命周期 ============
@@ -460,7 +662,11 @@ app.whenReady().then(() => {
   electronPid = process.pid;
   // macOS：这是贴边小部件而非普通应用，不占用 Dock 图标（对应 Windows 的 skipTaskbar）
   if (process.platform === 'darwin' && app.dock) app.dock.hide();
+  loadUiConfig();               // 恢复侧边栏停靠侧/显示模式（建窗前读取，避免启动跳动）
+  loadClipHistory();            // 恢复上次剪贴板历史
+  setInterval(pollClipboard, 1000);
   createSidebar();
+  createTray();
   startFullscreenCheck();
 
   app.on('activate', () => {

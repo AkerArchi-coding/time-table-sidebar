@@ -32,13 +32,27 @@ contextBridge.exposeInMainWorld('timetable', {
   weatherSearch: (q) => ipcRenderer.invoke('weather-search', q),
   // 系统资源：CPU/内存/运行时长快照
   sysStats: () => ipcRenderer.invoke('sys-stats'),
-  // 剪贴板历史：查询 / 回填 / 清空 / 变化订阅
+  // 剪贴板历史：查询 / 回填 / 清空 / 删除单条 / 变化订阅 / 开关同步
   clipboardList: () => ipcRenderer.invoke('clipboard-list'),
   clipboardCopy: (text) => ipcRenderer.send('clipboard-copy', text),
   clipboardClear: () => ipcRenderer.send('clipboard-clear'),
+  clipboardDelete: (text) => ipcRenderer.send('clipboard-delete', text),
+  clipboardEnabled: (on) => ipcRenderer.send('clipboard-enabled', on),
   onClipboardUpdate: (cb) => {
     const handler = (_e, list) => cb(list);
     ipcRenderer.on('clipboard-update', handler);
     return () => ipcRenderer.removeListener('clipboard-update', handler);
-  }
+  },
+  // 开机自动启动：查询 / 设置（平台细节在主进程，UI 与实现解耦）
+  autostartGet: () => ipcRenderer.invoke('autostart-get'),
+  autostartSet: (on) => ipcRenderer.send('autostart-set', on),
+  // 托盘动作：主进程 → 渲染层（如托盘菜单"设置"）
+  onTrayAction: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('tray-action', handler);
+    return () => ipcRenderer.removeListener('tray-action', handler);
+  },
+  // 侧边栏 UI 配置：停靠侧 / 显示模式（主进程持有并持久化）
+  uiConfigGet: () => ipcRenderer.invoke('ui-config-get'),
+  uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial)
 });

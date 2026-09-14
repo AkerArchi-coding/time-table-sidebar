@@ -11,6 +11,13 @@ const URGENCIES = {
   normal: { label: '一般', color: '#f1c40f' },   // 黄色
   loose:  { label: '松散', color: '#2ecc71' }    // 绿色
 };
+// 项目优先级（三档枚举，默认中）
+const PRIORITIES = {
+  high:   { label: '高优先', color: '#e74c3c' },
+  medium: { label: '中优先', color: '#f1c40f' },
+  low:    { label: '低优先', color: '#2ecc71' }
+};
+function projectPriority(p) { return PRIORITIES[p && p.priority] || PRIORITIES.medium; }
 
 const $ = (id) => document.getElementById(id);
 const sidebar = $('sidebar');
@@ -93,7 +100,10 @@ function fmtShort(key) {
 
 // ============ 数据存取 ============
 // 事项（Task）：projectId 为空表示未归类
+// 缓存策略：首次读盘后常驻内存，saveEvents 写穿更新缓存（读多写少，消除每次 JSON.parse）
+let eventsCache = null;
 function loadEvents() {
+  if (eventsCache) return eventsCache;
   try {
     const list = JSON.parse(localStorage.getItem('events') || '[]');
     // 数据迁移兜底：补齐新字段
@@ -108,11 +118,13 @@ function loadEvents() {
         const t = ev.startDate; ev.startDate = ev.endDate; ev.endDate = t;
       }
     }
+    eventsCache = list;
     return list;
-  } catch { return []; }
+  } catch { eventsCache = []; return eventsCache; }
 }
 function saveEvents(list) {
-  localStorage.setItem('events', JSON.stringify(list));
+  eventsCache = Array.isArray(list) ? list : [];
+  localStorage.setItem('events', JSON.stringify(eventsCache));
 }
 function getEventsByDate(key) {
   return sortDayEvents(
@@ -175,8 +187,10 @@ function sortDayEvents(list) {
   return [...list].sort(cmp[daySort.by] || cmp.start);
 }
 
-// 项目（Project）：1 → N 事项
+// 项目（Project）：1 → N 事项（缓存策略同 loadEvents）
+let projectsCache = null;
 function loadProjects() {
+  if (projectsCache) return projectsCache;
   try {
     const list = JSON.parse(localStorage.getItem('projects') || '[]');
     // 数据迁移兜底：补齐起止时间与分类
@@ -190,12 +204,14 @@ function loadProjects() {
         const t = p.startDate; p.startDate = p.endDate; p.endDate = t;
       }
     }
+    projectsCache = list;
     return list;
   }
-  catch { return []; }
+  catch { projectsCache = []; return projectsCache; }
 }
 function saveProjects(list) {
-  localStorage.setItem('projects', JSON.stringify(list));
+  projectsCache = Array.isArray(list) ? list : [];
+  localStorage.setItem('projects', JSON.stringify(projectsCache));
 }
 function getProject(id) {
   return loadProjects().find(p => p.id === id) || null;
@@ -257,6 +273,8 @@ function setHeader(title, sub, showNav) {
 }
 
 function render() {
+  ensureDateRollover();   // 跨天驻留后先校正日期锚点，再重画
+
   // tab 高亮
   viewTabs.querySelectorAll('button').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === currentView);
@@ -275,12 +293,17 @@ function render() {
   // 工具覆盖层优先（不改动 currentView，返回即回原视图）
   if (currentTool) { renderTool(); return; }
 
+  // 重建列表前记住滚动位置，重建后恢复（避免 60s 自动刷新等触发时跳顶）
+  const scrollPos = weekList.scrollTop;
+
   switch (currentView) {
     case 'today': renderToday(); break;
     case 'projects': renderProjects(); break;
     case 'tasks': renderTasks(); break;
     case 'calendar': renderWeek(); break;
   }
+
+  weekList.scrollTop = scrollPos;
 }
 
 // ============ 公共构建器 ============
@@ -590,7 +613,8 @@ function bindViewEvents() {
       if (end && !start) start = end;
       if (start && end && end < start) end = start;
       const category = form.querySelector('.pj-category').value || 'work';
-      const fields = { name, description: desc, startDate: start, endDate: end, category };
+      const priority = form.querySelector('.pj-priority').value || 'medium';
+      const fields = { name, description: desc, startDate: start, endDate: end, category, priority };
       if (form.dataset.editId) updateProject(form.dataset.editId, fields);
       else addProject(fields);
       closeProjectForm(form);
@@ -616,11 +640,18 @@ function buildProjectForm() {
       <span class="date-sep">~</span>
       <input type="date" class="pj-end" title="结束日期" />
     </div>
-    <select class="pj-category" title="分类">
-      <option value="work">工作</option>
-      <option value="personal">个人事务</option>
-      <option value="family">家庭事务</option>
-    </select>
+    <div class="add-form-row2 pj-select-row">
+      <select class="pj-category" title="分类">
+        <option value="work">工作</option>
+        <option value="personal">个人事务</option>
+        <option value="family">家庭事务</option>
+      </select>
+      <select class="pj-priority" title="优先级">
+        <option value="high">高优先</option>
+        <option value="medium">中优先</option>
+        <option value="low">低优先</option>
+      </select>
+    </div>
     <div class="add-form-row3">
       <button class="cancel">取消</button>
       <button class="save">保存</button>
@@ -654,6 +685,7 @@ function openProjectForm(projectId, form) {
     f.querySelector('.pj-start').value = p.startDate || '';
     f.querySelector('.pj-end').value = p.endDate || '';
     f.querySelector('.pj-category').value = p.category || 'work';
+    f.querySelector('.pj-priority').value = p.priority || 'medium';
   } else {
     delete f.dataset.editId;
     f.querySelector('.pj-name').value = '';
@@ -661,6 +693,7 @@ function openProjectForm(projectId, form) {
     f.querySelector('.pj-start').value = '';
     f.querySelector('.pj-end').value = '';
     f.querySelector('.pj-category').value = 'work';
+    f.querySelector('.pj-priority').value = 'medium';
   }
   f.classList.remove('hidden');
   if (window.timetable) window.timetable.setEditing(true);
@@ -673,6 +706,8 @@ function closeProjectForm(f) {
   f.querySelectorAll('input').forEach(i => i.value = '');
   const cat = f.querySelector('.pj-category');
   if (cat) cat.value = 'work';
+  const pri = f.querySelector('.pj-priority');
+  if (pri) pri.value = 'medium';
   if (window.timetable) window.timetable.setEditing(false);
 }
 
@@ -701,10 +736,22 @@ function progressBarHtml(done, total) {
 // ============ 今日视图 ============
 // 聚焦日期（可点击日期卡切换，默认真实今天）；窗口 = anchor 前1天 ~ 后2天
 let todayAnchor = dateKey(today());
+let anchorFollowsToday = true;   // anchor 是否处于"跟随真实今天"状态（手动选其他日期后解除）
 function setTodayAnchor(key) {
   if (todayAnchor === key) return;
   todayAnchor = key;
+  anchorFollowsToday = key === dateKey(today());   // 点"回到今天"/选当天 → 恢复跟随
   render();
+}
+
+// 跨日滚动：应用驻留过午夜时自动跟随真实日期（手动选中的历史/未来日不被打断）
+let lastSeenDay = dateKey(today());
+function ensureDateRollover() {
+  const tk = dateKey(today());
+  if (tk === lastSeenDay) return;
+  lastSeenDay = tk;
+  rangeStart = addDays(stripTime(new Date()), -1);   // 日历周窗口同步平移
+  if (anchorFollowsToday) todayAnchor = tk;          // 仅跟随态才滚动聚焦日
 }
 
 function renderToday() {
@@ -844,7 +891,8 @@ function buildDayCard(d, opts = {}) {
     hint.textContent = '— 无 —';
     list.appendChild(hint);
   } else {
-    for (const ev of events) list.appendChild(buildEventItem(ev));
+    // 显示所属项目徽标（未归类同样标注，与事项视图行为一致）
+    for (const ev of events) list.appendChild(buildEventItem(ev, { showProject: true }));
   }
   card.appendChild(list);
 
@@ -883,6 +931,7 @@ function renderProjects() {
   for (const p of projects) {
     const { done, total } = projectProgress(p.id);
     const cat = projectCategory(p);
+    const pri = projectPriority(p);
     const expanded = expandedProjectId === p.id;
     const card = document.createElement('div');
     card.className = 'project-card' + (expanded ? ' expanded' : '');
@@ -898,6 +947,7 @@ function renderProjects() {
       ${progressBarHtml(done, total)}
       <div class="project-meta">
         <span class="pj-meta-cat" style="color:${cat.color}">● ${cat.label}</span>
+        <span class="pj-meta-pri" style="color:${pri.color}">◆ ${pri.label}</span>
         <span>${projectRangeText(p)}</span>
         <span>${total} 个事项</span>
       </div>
@@ -924,6 +974,7 @@ function buildProjectInline(p) {
 
   // 项目信息卡（✎ 按钮或右键可编辑基本信息）
   const cat = projectCategory(p);
+  const pri = projectPriority(p);
   const info = document.createElement('div');
   info.className = 'project-info';
   info.dataset.id = p.id;
@@ -937,6 +988,7 @@ function buildProjectInline(p) {
     ${progressBarHtml(done, total)}
     <div class="project-meta">
       <span class="pj-meta-cat" style="color:${cat.color}">● ${cat.label}</span>
+      <span class="pj-meta-pri" style="color:${pri.color}">◆ ${pri.label}</span>
       <span>${projectRangeText(p)}</span>
       <span>项目进度 ${pct}% · ${total} 个事项 · ${done} 已完成</span>
     </div>
@@ -1350,7 +1402,7 @@ function renderTasks() {
 }
 
 // ============ 数据操作 ============
-function addEvent(fields) {
+function addEvent(fields, skipRender) {
   const all = loadEvents();
   all.push({
     id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
@@ -1369,7 +1421,7 @@ function addEvent(fields) {
   });
   saveEvents(all);
   bumpProjectRevision(fields.projectId);   // 项目内容变化 → 版本号递增
-  render();
+  if (!skipRender) render();               // 批量场景由调用方最后统一 render
 }
 
 // 编辑事项（日期区间/分类/紧急程度/项目等）
@@ -1485,6 +1537,7 @@ function addProject(fields) {
     startDate: fields.startDate || '',
     endDate: fields.endDate || fields.startDate || '',
     category: fields.category || 'work',
+    priority: fields.priority || 'medium',
     status: 'active',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -1592,7 +1645,8 @@ function snapshotProject(pid) {
       id: p.id, name: p.name || '',
       description: p.description || '',
       startDate: p.startDate || '', endDate: p.endDate || '',
-      category: p.category || 'work', status: p.status || 'active',
+      category: p.category || 'work', priority: p.priority || 'medium',
+      status: p.status || 'active',
       createdAt: p.createdAt || '', updatedAt: p.updatedAt || '',
       revision: p.revision || 1
     },
@@ -1729,6 +1783,7 @@ const SYNC_PROJECT_FIELDS = [
   { key: 'startDate',   label: '开始日期', type: 'date' },
   { key: 'endDate',     label: '结束日期', type: 'date' },
   { key: 'category',    label: '分类',     type: 'category' },
+  { key: 'priority',    label: '优先级',   type: 'text' },
   { key: 'status',      label: '状态',     type: 'text' }
 ];
 const SYNC_TASK_FIELDS = [
@@ -1977,6 +2032,7 @@ function applyImportNew() {
     description: ip.description || '',
     startDate: ip.startDate || '', endDate: ip.endDate || '',
     category: ip.category || 'work',
+    priority: ip.priority || 'medium',
     status: ip.status || 'active',
     revision: incoming.revision || 1,
     createdAt: ip.createdAt || new Date().toISOString(),
@@ -2407,6 +2463,70 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+// ============ 系统合成音（Web Audio 振荡器，无音频文件依赖，失败静默） ============
+let audioCtx = null;
+// pattern: [频率Hz, 起始偏移s, 持续s] 数组
+const CHIME = {
+  ding:   [[880, 0, 0.4], [1318.5, 0.18, 0.55]],                   // 番茄钟阶段切换（两音上行）
+  remind: [[880, 0, 0.3], [880, 0.24, 0.3], [1174.7, 0.48, 0.7]]   // 事项到点（三连音）
+};
+function playChime(pattern) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0 = audioCtx.currentTime;
+    for (const [freq, at, dur] of pattern) {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      const t = t0 + at;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t); o.stop(t + dur + 0.05);
+    }
+  } catch { /* 无音频设备时静默 */ }
+}
+
+// ============ 事项到点提醒 ============
+// 触发条件：开始日=今天 且 time=当前 HH:MM，仅到点那一分钟内提醒一次（错过不补）。
+// 已提醒标记按日持久化（localStorage: remindedKeys），重启后当天不重复提醒。
+let remindedDate = '';
+let remindedKeys = new Set();
+(function loadRemindedKeys() {
+  try {
+    const o = JSON.parse(localStorage.getItem('remindedKeys') || '{}');
+    const tk = dateKey(today());
+    if (o.date === tk && Array.isArray(o.ids)) { remindedKeys = new Set(o.ids); remindedDate = tk; }
+  } catch { /* 损坏则当空 */ }
+})();
+function saveRemindedKeys() {
+  localStorage.setItem('remindedKeys', JSON.stringify({ date: remindedDate, ids: [...remindedKeys] }));
+}
+function checkReminders() {
+  const now = new Date();
+  const tk = dateKey(now);
+  if (tk !== remindedDate) { remindedDate = tk; remindedKeys.clear(); }   // 跨日重置
+  const hm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  for (const ev of loadEvents()) {
+    if (ev.done || !ev.time || eventStart(ev) !== tk) continue;
+    if (ev.time !== hm) continue;
+    const key = ev.id + '|' + tk;
+    if (remindedKeys.has(key)) continue;
+    remindedKeys.add(key);
+    saveRemindedKeys();
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification('日程到点提醒', { body: `${ev.time} ${ev.title}` });
+      }
+    } catch { /* 通知不可用时仅响铃 */ }
+    playChime(CHIME.remind);
+    showToast('到点提醒：' + ev.title);
+  }
+}
+
 // ============ 侧边栏工具（快速添加 / 番茄钟 / 今日进度 / 快速便签） ============
 // 工具以「内容区覆盖层」呈现，不改 currentView，返回即回原视图；均为本地功能，不涉及网络。
 const TOOL_DEFS = {
@@ -2416,7 +2536,8 @@ const TOOL_DEFS = {
   notes:     { title: '快速便签', pinEditing: true },
   weather:   { title: '天气',     pinEditing: false },
   sys:       { title: '系统资源', pinEditing: false },
-  clipboard: { title: '剪贴板',   pinEditing: false }
+  clipboard: { title: '剪贴板',   pinEditing: false },
+  settings:  { title: '设置',     pinEditing: false }
 };
 
 function openTool(name) {
@@ -2449,6 +2570,7 @@ function renderTool() {
   else if (currentTool === 'weather') buildWeather(panel);
   else if (currentTool === 'sys') buildSys(panel);
   else if (currentTool === 'clipboard') buildClipboard(panel);
+  else if (currentTool === 'settings') buildSettings(panel);
   weekList.appendChild(panel);
 }
 
@@ -2501,6 +2623,10 @@ function buildQuickAdd(panel) {
 // ---- 工具二：番茄钟（与系统时钟完全独立；折叠/切走后继续计时，图标红点提示） ----
 const POMO = {
   workMin: 25, breakMin: 5,
+  longMin: 15, cycle: 4,  // 连续完成 cycle 个专注后进入长休息
+  session: 0,             // 当前周期内已完成的专注数
+  isLong: false,          // 当前休息是否为长休息
+  started: false,         // 本次应用启动后是否开始过（用于"准备专注/继续"文案）
   mode: 'work',           // work | break
   running: false,
   endAt: 0,               // 运行中：倒计时结束时间戳
@@ -2509,6 +2635,23 @@ const POMO = {
   doneToday: 0,
   doneDate: ''
 };
+// 时长/周期配置持久化（今日完成数已有 pomoStats，这里只存偏好）
+function loadPomoCfg() {
+  try {
+    const c = JSON.parse(localStorage.getItem('pomoCfg') || '{}');
+    if ([15, 25, 45].includes(c.workMin)) POMO.workMin = c.workMin;
+    if ([5, 10].includes(c.breakMin)) POMO.breakMin = c.breakMin;
+    if ([10, 15, 20, 30].includes(c.longMin)) POMO.longMin = c.longMin;
+    if ([2, 3, 4, 6].includes(c.cycle)) POMO.cycle = c.cycle;
+  } catch { /* 首次运行 */ }
+}
+function savePomoCfg() {
+  localStorage.setItem('pomoCfg', JSON.stringify({
+    workMin: POMO.workMin, breakMin: POMO.breakMin, longMin: POMO.longMin, cycle: POMO.cycle
+  }));
+}
+loadPomoCfg();
+POMO.remainMs = POMO.workMin * 60000;   // 按持久化配置重设初始剩余
 function loadPomoStats() {
   try {
     const s = JSON.parse(localStorage.getItem('pomoStats') || '{}');
@@ -2525,7 +2668,17 @@ function pomoFmt(ms) {
   const s = Math.max(0, Math.ceil(ms / 1000));
   return `${pad2(Math.floor(s / 60))}:${pad2(s % 60)}`;
 }
-function pomoPhaseMs() { return (POMO.mode === 'work' ? POMO.workMin : POMO.breakMin) * 60000; }
+function pomoPhaseMs() {
+  if (POMO.mode === 'work') return POMO.workMin * 60000;
+  return (POMO.isLong ? POMO.longMin : POMO.breakMin) * 60000;
+}
+// 进入休息：自然完成一个专注后调用（跳过不计入周期）
+function pomoEnterBreak() {
+  POMO.session += 1;
+  POMO.isLong = POMO.session % POMO.cycle === 0;
+  POMO.mode = 'break';
+  POMO.remainMs = pomoPhaseMs();
+}
 function pomoNotify(title, body) {
   try {
     if (Notification.permission === 'granted') new Notification(title, { body });
@@ -2545,16 +2698,20 @@ function pomoTick() {
     POMO.doneToday += 1;
     if (POMO.doneDate !== dateKey(today())) { POMO.doneToday = 1; POMO.doneDate = dateKey(today()); }
     savePomoStats();
-    POMO.mode = 'break';
-    POMO.remainMs = pomoPhaseMs();
+    pomoEnterBreak();
     POMO.endAt = Date.now() + POMO.remainMs;   // 自动进入休息
-    pomoNotify('番茄钟', '工作结束，休息一下吧');
+    playChime(CHIME.ding);
+    pomoNotify('番茄钟', POMO.isLong
+      ? `连续 ${POMO.session} 个专注完成，进入长休息`
+      : '工作结束，休息一下吧');
   } else {
     POMO.mode = 'work';
+    if (POMO.isLong) { POMO.session = 0; POMO.isLong = false; }   // 长休息结束 → 开启新一轮周期
     POMO.remainMs = pomoPhaseMs();
     POMO.running = false;
     POMO.endAt = 0;
     clearInterval(POMO.timerId); POMO.timerId = null;
+    playChime(CHIME.ding);
     pomoNotify('番茄钟', '休息结束，开始下一个专注');
   }
   pomoPaint(true);
@@ -2565,6 +2722,7 @@ function pomoStart() {
     try { Notification.requestPermission(); } catch { /* 忽略 */ }
   }
   POMO.running = true;
+  POMO.started = true;
   POMO.endAt = Date.now() + POMO.remainMs;
   if (POMO.timerId) clearInterval(POMO.timerId);
   POMO.timerId = setInterval(pomoTick, 1000);
@@ -2581,12 +2739,21 @@ function pomoPause() {
 function pomoReset() {
   POMO.running = false; POMO.endAt = 0;
   POMO.mode = 'work';
+  POMO.session = 0; POMO.isLong = false;   // 重置回全新周期
   POMO.remainMs = pomoPhaseMs();
   if (POMO.timerId) { clearInterval(POMO.timerId); POMO.timerId = null; }
   pomoPaint(true);
 }
 function pomoSkip() {
-  POMO.mode = POMO.mode === 'work' ? 'break' : 'work';
+  if (POMO.mode === 'work') {
+    // 跳过专注：不计入周期/统计，进入普通短休息
+    POMO.isLong = false;
+    POMO.mode = 'break';
+  } else {
+    // 跳过休息：长休息同样开启新一轮周期
+    if (POMO.isLong) { POMO.session = 0; POMO.isLong = false; }
+    POMO.mode = 'work';
+  }
   POMO.remainMs = pomoPhaseMs();
   if (POMO.running) POMO.endAt = Date.now() + POMO.remainMs;
   pomoPaint(true);
@@ -2596,19 +2763,41 @@ function pomoPaint(full) {
   const dot = railEl.querySelector('[data-tool="pomodoro"] .rail-dot');
   if (dot) dot.classList.toggle('hidden', !POMO.running);
   const pico = railEl.querySelector('[data-tool="pomodoro"]');
-  if (pico) pico.title = `番茄钟（${POMO.running ? '进行中 ' : ''}${pomoFmt(POMO.remainMs)}）`;
+  if (pico) {
+    const phase = POMO.mode === 'work' ? '专注' : (POMO.isLong ? '长休息' : '休息');
+    pico.title = `番茄钟（${phase}${POMO.running ? '' : '·已暂停'} ${pomoFmt(POMO.remainMs)}）`;
+  }
   const tEl = document.querySelector('.pomo-time');
   if (tEl) tEl.textContent = pomoFmt(POMO.remainMs);
   if (full) render();
 }
 
+function pomoStatusLabel() {
+  if (POMO.mode === 'work') {
+    if (POMO.running) return '🍅 专注中';
+    return POMO.started ? '⏸ 已暂停' : '🍅 准备专注';
+  }
+  const rest = POMO.isLong ? '🛏 长休息' : '☕ 短休息';
+  return POMO.running ? rest + '中' : '⏸ 已暂停';
+}
+function pomoCycleDots() {
+  let html = '';
+  for (let i = 0; i < POMO.cycle; i++) {
+    html += `<span class="pc-dot${i < POMO.session ? ' on' : ''}"></span>`;
+  }
+  return html;
+}
+
 function buildPomodoro(panel) {
+  const nextPos = Math.min(POMO.session + 1, POMO.cycle);
   panel.innerHTML = `
     <div class="pomo-stage">
-      <div class="pomo-mode">${POMO.mode === 'work' ? '🍅 专注中' : '☕ 休息中'}</div>
+      <div class="pomo-mode">${pomoStatusLabel()}</div>
       <div class="pomo-time">${pomoFmt(POMO.remainMs)}</div>
+      <div class="pomo-cycles" title="每 ${POMO.cycle} 个专注后进入长休息">${pomoCycleDots()}</div>
+      <div class="pomo-cyc-hint">第 ${nextPos}/${POMO.cycle} 个专注${POMO.mode === 'break' ? `（休息中，已完成 ${POMO.session} 个）` : ''}</div>
       <div class="pomo-actions">
-        <button class="pomo-toggle">${POMO.running ? '暂停' : '开始'}</button>
+        <button class="pomo-toggle">${POMO.running ? '暂停' : (POMO.started ? '继续' : '开始')}</button>
         <button class="pomo-reset">重置</button>
         <button class="pomo-skip">跳过本阶段</button>
       </div>
@@ -2625,7 +2814,19 @@ function buildPomodoro(panel) {
         </select>
       </label>
     </div>
-    <div class="tool-hint">今日已完成 ${POMO.doneToday} 个专注；计时与侧栏系统时钟互不影响，收起侧栏仍继续</div>
+    <div class="pomo-row">
+      <label>长休息
+        <select class="pomo-long">
+          ${[10, 15, 20, 30].map(m => `<option value="${m}"${POMO.longMin === m ? ' selected' : ''}>${m} 分钟</option>`).join('')}
+        </select>
+      </label>
+      <label>长休息周期
+        <select class="pomo-cycle">
+          ${[2, 3, 4, 6].map(n => `<option value="${n}"${POMO.cycle === n ? ' selected' : ''}>每 ${n} 个</option>`).join('')}
+        </select>
+      </label>
+    </div>
+    <div class="tool-hint">今日已完成 ${POMO.doneToday} 个专注；连续 ${POMO.cycle} 个专注后自动长休息；计时与系统时钟互不影响</div>
   `;
   panel.querySelector('.pomo-toggle').addEventListener('click', () => POMO.running ? pomoPause() : pomoStart());
   panel.querySelector('.pomo-reset').addEventListener('click', pomoReset);
@@ -2633,11 +2834,25 @@ function buildPomodoro(panel) {
   panel.querySelector('.pomo-work').addEventListener('change', (e) => {
     POMO.workMin = Number(e.target.value);
     if (!POMO.running && POMO.mode === 'work') POMO.remainMs = pomoPhaseMs();
+    savePomoCfg();
     pomoPaint(true);
   });
   panel.querySelector('.pomo-break').addEventListener('change', (e) => {
     POMO.breakMin = Number(e.target.value);
-    if (!POMO.running && POMO.mode === 'break') POMO.remainMs = pomoPhaseMs();
+    if (!POMO.running && POMO.mode === 'break' && !POMO.isLong) POMO.remainMs = pomoPhaseMs();
+    savePomoCfg();
+    pomoPaint(true);
+  });
+  panel.querySelector('.pomo-long').addEventListener('change', (e) => {
+    POMO.longMin = Number(e.target.value);
+    if (!POMO.running && POMO.mode === 'break' && POMO.isLong) POMO.remainMs = pomoPhaseMs();
+    savePomoCfg();
+    pomoPaint(true);
+  });
+  panel.querySelector('.pomo-cycle').addEventListener('change', (e) => {
+    POMO.cycle = Number(e.target.value);
+    if (POMO.session >= POMO.cycle) POMO.session = 0;   // 周期缩短时回到起点
+    savePomoCfg();
     pomoPaint(true);
   });
 }
@@ -2702,23 +2917,25 @@ let notesDoneMap = loadNotesDone();   // { 已转行的 trim 文本: true }
 function saveNotesDone() { localStorage.setItem('notesDoneLines', JSON.stringify(notesDoneMap)); }
 
 // 单行 → 一条今日事项（默认工作类、一般紧急度、未归类）；已转行跳过
-function notesConvertLine(title, silent) {
+function notesConvertLine(title, silent, skipRender) {
   title = String(title || '').trim();
   if (!title || notesDoneMap[title]) return false;
   const tk = dateKey(today());
   notesDoneMap[title] = true;
   saveNotesDone();
-  addEvent({ title, startDate: tk, endDate: tk, time: '', category: 'work', urgency: 'normal', projectId: null });
+  addEvent({ title, startDate: tk, endDate: tk, time: '', category: 'work', urgency: 'normal', projectId: null }, skipRender);
+  if (!skipRender) render();
   if (!silent) showToast('已转为事项：' + title);
   return true;
 }
 
-// 便签全部非空未转行 → 批量事项
+// 便签全部非空未转行 → 批量事项（只 render 一次）
 function notesConvertAll() {
   const lines = (localStorage.getItem('quickNotes') || '')
     .split('\n').map(s => s.trim()).filter(s => s && !notesDoneMap[s]);
   if (!lines.length) { showToast('没有可转换的新内容'); return; }
-  lines.forEach(l => notesConvertLine(l, true));   // addEvent 每次内部 render，最后一次呈现完整状态
+  lines.forEach(l => notesConvertLine(l, true, true));
+  render();
   showToast(`已将 ${lines.length} 行转为今日事项`);
 }
 
@@ -3084,8 +3301,19 @@ function renderClipboardPanel() {
     const hint = document.createElement('div');
     hint.className = 'clip-hint';
     hint.textContent = '点击复制回剪贴板';
+    const del = document.createElement('button');
+    del.className = 'clip-del';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = '删除该条';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();                       // 不触发复制
+      if (window.timetable) window.timetable.clipboardDelete(text);
+      showToast('已删除第 ' + (i + 1) + ' 条');
+    });
     item.appendChild(pre);
     item.appendChild(hint);
+    item.appendChild(del);
     item.addEventListener('click', () => {
       if (window.timetable) window.timetable.clipboardCopy(text);
       showToast(`已复制第 ${i + 1} 条`);
@@ -3148,6 +3376,114 @@ if (window.timetable) {
   window.timetable.onClipboardUpdate((list) => {
     clipHistoryCache = list || [];
     if (currentTool === 'clipboard') renderClipboardPanel();
+  });
+  // 启动时把本地保存的剪贴板开关同步给主进程（主进程默认开启，需纠正为上次保存的值）
+  window.timetable.clipboardEnabled(loadAppSettings().clipboardEnabled !== false);
+}
+
+// ---- 设置（应用级配置；appSettings 为唯一存储 key，后续阶段在此追加字段） ----
+function loadAppSettings() {
+  try { return JSON.parse(localStorage.getItem('appSettings') || '{}'); } catch { return {}; }
+}
+function saveAppSettings(s) {
+  localStorage.setItem('appSettings', JSON.stringify(s));
+}
+
+function buildSettings(panel) {
+  panel.innerHTML = `
+    <div class="set-group">
+      <div class="set-group-title">侧边栏</div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">停靠位置</span>
+          <span class="set-desc">贴附在屏幕的哪一侧</span>
+        </span>
+        <span class="set-seg">
+          <button type="button" class="seg-btn" data-side="left">左侧</button>
+          <button type="button" class="seg-btn" data-side="right">右侧</button>
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">显示模式</span>
+          <span class="set-desc">隐藏模式下鼠标贴边停留唤出</span>
+        </span>
+        <select class="set-mode" title="显示模式">
+          <option value="rail">常驻窄条</option>
+          <option value="mini">迷你 Dock（半高）</option>
+          <option value="hidden">完全隐藏</option>
+        </select>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-group-title">通用</div>
+      <label class="set-row">
+        <span class="set-text">
+          <span class="set-name">开机自动启动</span>
+          <span class="set-desc">登录系统后自动运行日程侧边栏</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-autostart-input"><span class="set-slider"></span></span>
+      </label>
+      <label class="set-row">
+        <span class="set-text">
+          <span class="set-name">剪贴板历史</span>
+          <span class="set-desc">自动记录复制的文本，仅保存在本机（最近 30 条）</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-clip-input"><span class="set-slider"></span></span>
+      </label>
+    </div>
+    <div class="set-about">日程侧边栏 v0.1.0<br>所有数据仅保存在本机</div>
+  `;
+
+  // 剪贴板历史开关（关 = 暂停记录，不清空已有历史）
+  const clipSwitch = panel.querySelector('.set-clip-input');
+  const st = loadAppSettings();
+  clipSwitch.checked = st.clipboardEnabled !== false;   // 默认开
+  clipSwitch.addEventListener('change', () => {
+    const s = loadAppSettings();
+    s.clipboardEnabled = clipSwitch.checked;
+    saveAppSettings(s);
+    if (window.timetable) window.timetable.clipboardEnabled(clipSwitch.checked);
+    showToast(clipSwitch.checked ? '剪贴板历史已开启' : '剪贴板历史已暂停');
+  });
+
+  // 开机自动启动（状态实时读系统，避免与注册表/登录项不一致）
+  const autoSwitch = panel.querySelector('.set-autostart-input');
+  autoSwitch.checked = false;
+  if (window.timetable && window.timetable.autostartGet) {
+    window.timetable.autostartGet().then(on => { autoSwitch.checked = !!on; });
+  }
+  autoSwitch.addEventListener('change', () => {
+    if (window.timetable) window.timetable.autostartSet(autoSwitch.checked);
+    showToast(autoSwitch.checked ? '已开启开机自动启动' : '已关闭开机自动启动');
+  });
+
+  // ---- 侧边栏：停靠位置 / 显示模式（主进程持有配置，切换即时生效） ----
+  const sideBtns = panel.querySelectorAll('.seg-btn[data-side]');
+  const modeSel = panel.querySelector('.set-mode');
+  const applyCfg = (cfg) => {
+    if (!cfg) return;
+    sideBtns.forEach(b => b.classList.toggle('active', b.dataset.side === cfg.side));
+    modeSel.value = cfg.mode || 'rail';
+  };
+  if (window.timetable && window.timetable.uiConfigGet) {
+    window.timetable.uiConfigGet().then(applyCfg).catch(() => { /* 保持默认 */ });
+  }
+  sideBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const side = btn.dataset.side;
+      sideBtns.forEach(b => b.classList.toggle('active', b === btn));
+      if (window.timetable && window.timetable.uiConfigSet) {
+        window.timetable.uiConfigSet({ side });
+      }
+    });
+  });
+  modeSel.addEventListener('change', () => {
+    if (window.timetable && window.timetable.uiConfigSet) {
+      window.timetable.uiConfigSet({ mode: modeSel.value });
+    }
+    const labels = { rail: '常驻窄条', mini: '迷你 Dock', hidden: '完全隐藏' };
+    showToast('显示模式：' + (labels[modeSel.value] || modeSel.value));
   });
 }
 
@@ -3457,13 +3793,40 @@ $('toolStrip').addEventListener('click', (e) => {
 if (window.timetable) {
   window.timetable.onStateChange((state) => {
     sidebar.classList.toggle('expanded', !!state.expanded);
+    // 停靠侧 / 显示模式：镜像圆角边线 + 迷你态压缩样式
+    if (state.side) sidebar.classList.toggle('side-left', state.side === 'left');
+    if (state.mode) sidebar.classList.toggle('mini', state.mode === 'mini');
   });
+  // 启动即应用持久化的 UI 配置（主进程建窗已按配置定位，这里同步渲染层样式类）
+  if (window.timetable.uiConfigGet) {
+    window.timetable.uiConfigGet().then((cfg) => {
+      if (!cfg) return;
+      sidebar.classList.toggle('side-left', cfg.side === 'left');
+      sidebar.classList.toggle('mini', cfg.mode === 'mini');
+    }).catch(() => { /* 主进程不可达时保持默认 */ });
+  }
 }
 
 // ============ 初始化 ============
+// 应用设置同步：剪贴板开关下发主进程（关 = 暂停记录）
+if (window.timetable) {
+  const bootSt = loadAppSettings();
+  window.timetable.clipboardEnabled(bootSt.clipboardEnabled !== false);
+  // 托盘菜单动作（如"设置"→ 展开并打开设置工具）
+  window.timetable.onTrayAction((d) => {
+    if (d && d.action === 'settings') openTool('settings');
+  });
+}
 renderClock();
 render();
 setInterval(renderClock, 30 * 1000);
+
+// 事项到点提醒：15 秒轮询（同一分钟内 4 次机会命中 HH:MM 等值判定）
+setInterval(checkReminders, 15 * 1000);
+// 通知权限：启动即申请（到点提醒 / 番茄钟通知用）
+if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+  try { Notification.requestPermission(); } catch { /* 忽略 */ }
+}
 setInterval(() => {
   // 跨日/跨周时自动刷新；但工具打开（快速添加/便签有输入）或表单编辑中时跳过，避免清空用户输入
   if (currentTool) return;
@@ -3474,5 +3837,9 @@ setInterval(() => {
 // 天气：启动拉取一次，之后每 10 分钟刷新（窄条温度直显）
 refreshWeather();
 setInterval(refreshWeather, 10 * 60 * 1000);
-// 系统资源：窄条 CPU 读数每 3 秒采样
-setInterval(pollSysOnce, 3000);
+// 系统资源窄条读数：展开态 2s / 收起态 15s 自适应采样（主进程每次采样需 busy-wait 220ms，
+// 收起时 3s 常驻是无谓开销；工具面板打开时由 buildSys 自己的 2s 定时器负责）
+(function sysRailLoop() {
+  pollSysOnce();
+  setTimeout(sysRailLoop, sidebar.classList.contains('expanded') ? 2000 : 15000);
+})();
