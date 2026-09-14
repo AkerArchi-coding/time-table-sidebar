@@ -98,7 +98,7 @@ jobs:
           echo "$HOME/node-x64/bin" >> "$GITHUB_PATH"
 
       - name: 确认运行架构
-        run: node -p "'Node: ' + process.version + '  arch=' + process.arch"
+        run: node -e "console.log('Node', process.version, 'arch='+process.arch)"
 
       - name: 安装依赖（x64 原生）
         run: npm install
