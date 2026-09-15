@@ -616,6 +616,30 @@ ipcMain.on('autostart-set', (_e, on) => {
   } catch { /* 个别环境（便携目录权限等）设置失败时静默 */ }
 });
 
+// ============ 语音输入 IPC 占位 ============
+// 预留接口：当前只返回 not_implemented 状态，不调用麦克风。
+// 未来接入 VoiceService（src/services/voice/VoiceService.js）后替换为真实实现。
+// 隐私约束：未接入真实识别前，不收集/不传输任何音频数据。
+const VOICE_STATE_IDLE = 'idle';
+const VOICE_ERROR_NOT_IMPLEMENTED = { code: 'not_implemented', message: '语音输入尚未启用' };
+
+ipcMain.handle('voice-status', async () => ({
+  state: VOICE_STATE_IDLE,
+  available: false,
+  message: '语音输入尚未实现（架构预留）'
+}));
+
+ipcMain.on('voice-start', (_e, _options) => {
+  // 预留：未来由 VoiceService.start(options) 实现
+  if (sidebar && !sidebar.isDestroyed()) {
+    sidebar.webContents.send('voice-error', VOICE_ERROR_NOT_IMPLEMENTED);
+  }
+});
+
+ipcMain.on('voice-stop', () => {
+  // 预留：未来由 VoiceService.stop() 实现
+});
+
 // ============ 系统托盘 ============
 function createTray() {
   let icon = nativeImage.createEmpty();

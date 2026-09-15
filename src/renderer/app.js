@@ -3383,7 +3383,16 @@ if (window.timetable) {
 
 // ---- 设置（应用级配置；appSettings 为唯一存储 key，后续阶段在此追加字段） ----
 function loadAppSettings() {
-  try { return JSON.parse(localStorage.getItem('appSettings') || '{}'); } catch { return {}; }
+  try {
+    const saved = JSON.parse(localStorage.getItem('appSettings') || '{}');
+    // 语音输入默认配置（预留，默认关闭；实际功能由 voice service 提供）
+    return {
+      voiceInputEnabled: false,    // 默认关闭语音输入
+      speechProvider: 'system',   // 默认使用系统内置识别（隐私优先）
+      voiceLanguage: 'zh-CN',      // 默认中文
+      ...saved                     // 已有设置覆盖默认
+    };
+  } catch { return {}; }
 }
 function saveAppSettings(s) {
   localStorage.setItem('appSettings', JSON.stringify(s));

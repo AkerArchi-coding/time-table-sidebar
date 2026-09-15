@@ -60,5 +60,24 @@ contextBridge.exposeInMainWorld('timetable', {
   },
   // 侧边栏 UI 配置：停靠侧 / 显示模式（主进程持有并持久化）
   uiConfigGet: () => ipcRenderer.invoke('ui-config-get'),
-  uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial)
+  uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial),
+  // 语音输入（预留接口：当前主进程为占位实现，返回 not_implemented；未来接入 VoiceService）
+  voiceGetStatus: () => ipcRenderer.invoke('voice-status'),
+  voiceStart: (options) => ipcRenderer.send('voice-start', options || {}),
+  voiceStop: () => ipcRenderer.send('voice-stop'),
+  onVoiceResult: (cb) => {
+    const handler = (_e, result) => cb(result);
+    ipcRenderer.on('voice-result', handler);
+    return () => ipcRenderer.removeListener('voice-result', handler);
+  },
+  onVoiceState: (cb) => {
+    const handler = (_e, state) => cb(state);
+    ipcRenderer.on('voice-state', handler);
+    return () => ipcRenderer.removeListener('voice-state', handler);
+  },
+  onVoiceError: (cb) => {
+    const handler = (_e, err) => cb(err);
+    ipcRenderer.on('voice-error', handler);
+    return () => ipcRenderer.removeListener('voice-error', handler);
+  }
 });
