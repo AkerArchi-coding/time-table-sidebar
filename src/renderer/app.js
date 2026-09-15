@@ -3817,6 +3817,17 @@ if (window.timetable) {
     if (d && d.action === 'settings') openTool('settings');
   });
 }
+
+// 窗口可见性：隐藏进托盘时暂停非必要刷新（60s 全量重绘 / 系统采样 / 天气），重新显示时立即补刷。
+// 注意：到点提醒 checkReminders 不受此影响，窗口隐藏时照常通知。
+let windowVisible = true;
+if (window.timetable && window.timetable.onWindowVisible) {
+  window.timetable.onWindowVisible((v) => {
+    if (v === windowVisible) return;
+    windowVisible = v;
+    if (v) { renderClock(); render(); pollSysOnce(); refreshWeather(); }
+  });
+}
 renderClock();
 render();
 setInterval(renderClock, 30 * 1000);
@@ -3828,18 +3839,21 @@ if (typeof Notification !== 'undefined' && Notification.permission === 'default'
   try { Notification.requestPermission(); } catch { /* 忽略 */ }
 }
 setInterval(() => {
+  // 窗口隐藏进托盘时跳过整体重建（重新显示时 onWindowVisible 会立即补刷一次）
+  if (!windowVisible) return;
   // 跨日/跨周时自动刷新；但工具打开（快速添加/便签有输入）或表单编辑中时跳过，避免清空用户输入
   if (currentTool) return;
   if (document.querySelector('.add-form:not(.hidden), .project-form:not(.hidden), .editor-block')) return;
   render();
 }, 60 * 1000);
 
-// 天气：启动拉取一次，之后每 10 分钟刷新（窄条温度直显）
+// 天气：启动拉取一次，之后每 10 分钟刷新（窄条温度直显）；窗口隐藏时不请求
 refreshWeather();
-setInterval(refreshWeather, 10 * 60 * 1000);
+setInterval(() => { if (windowVisible) refreshWeather(); }, 10 * 60 * 1000);
 // 系统资源窄条读数：展开态 2s / 收起态 15s 自适应采样（主进程每次采样需 busy-wait 220ms，
-// 收起时 3s 常驻是无谓开销；工具面板打开时由 buildSys 自己的 2s 定时器负责）
+// 收起时 3s 常驻是无谓开销；工具面板打开时由 buildSys 自己的 2s 定时器负责）。
+// 窗口隐藏进托盘时不采样（窄条不可见），仅以 30s 空转保活，重新显示时由 onWindowVisible 立即补采。
 (function sysRailLoop() {
-  pollSysOnce();
-  setTimeout(sysRailLoop, sidebar.classList.contains('expanded') ? 2000 : 15000);
+  if (windowVisible) pollSysOnce();
+  setTimeout(sysRailLoop, !windowVisible ? 30000 : (sidebar.classList.contains('expanded') ? 2000 : 15000));
 })();

@@ -52,6 +52,12 @@ contextBridge.exposeInMainWorld('timetable', {
     ipcRenderer.on('tray-action', handler);
     return () => ipcRenderer.removeListener('tray-action', handler);
   },
+  // 窗口可见性：主进程在 show/hide 时广播（隐藏进托盘时渲染层暂停非必要刷新）
+  onWindowVisible: (cb) => {
+    const handler = (_e, visible) => cb(visible);
+    ipcRenderer.on('window-visible', handler);
+    return () => ipcRenderer.removeListener('window-visible', handler);
+  },
   // 侧边栏 UI 配置：停靠侧 / 显示模式（主进程持有并持久化）
   uiConfigGet: () => ipcRenderer.invoke('ui-config-get'),
   uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial)

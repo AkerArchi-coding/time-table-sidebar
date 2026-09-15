@@ -20,8 +20,10 @@ const EXPANDED_W = 360;        // 展开时宽度
 const TRIGGER_MARGIN = 6;      // 自动展开触发条带：屏幕最右 6px
 const EDGE_DWELL_MS = 260;     // 鼠标需在触发条带停留多久才展开（防误触）
 const COLLAPSE_DELAY = 450;    // 鼠标离开后多久收回（毫秒）
-const POLL_INTERVAL = 80;      // 鼠标位置轮询间隔（毫秒）
-const FS_CHECK_INTERVAL = 500; // 全屏检测间隔（毫秒）
+const POLL_INTERVAL = 80;      // 鼠标位置轮询间隔（毫秒）：窗口可见 / hidden 贴边唤出时
+const POLL_IDLE_INTERVAL = 500;// 鼠标轮询空闲间隔：非 hidden 模式窗口隐藏进托盘时（靠托盘唤起，无需灵敏）
+const FS_CHECK_INTERVAL = 500; // 全屏检测间隔（毫秒）：窗口可见时
+const FS_IDLE_INTERVAL = 1500; // 全屏检测空闲间隔：窗口隐藏时（降低后台 FFI 轮询频率）
 
 // ============ 全屏/最大化前台窗口检测 ============
 // Windows：通过 koffi 直接调用 user32.dll；macOS/Linux 暂不检测（安全返回 false，
@@ -97,9 +99,9 @@ function isForegroundFullscreen() {
   return coversScreen || maximized;
 }
 
-// 全屏检测定时器
+// 全屏检测定时器（自适应间隔：可见 500ms / 隐藏 1500ms，降低后台 FFI 轮询）
 function startFullscreenCheck() {
-  setInterval(() => {
+  const tick = () => {
     if (!sidebar || sidebar.isDestroyed()) return;
 
     const isFs = isForegroundFullscreen();
@@ -116,7 +118,16 @@ function startFullscreenCheck() {
       collapseSidebar(true);
       if (uiConfig.mode !== 'hidden' && !sidebar.isVisible()) sidebar.showInactive();
     }
-  }, FS_CHECK_INTERVAL);
+  };
+  const schedule = () => {
+    if (!sidebar || sidebar.isDestroyed()) return;
+    const idle = !sidebar.isVisible();
+    setTimeout(() => {
+      try { tick(); } catch { /* 单次检测异常不中断轮询链 */ }
+      schedule();
+    }, idle ? FS_IDLE_INTERVAL : FS_CHECK_INTERVAL);
+  };
+  schedule();
 }
 
 // ============ 侧边栏 UI 配置（停靠侧 / 显示模式；持久化于 userData） ============
@@ -203,7 +214,8 @@ function createSidebar() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: true   // 窗口隐藏进托盘时节流渲染器定时器/动画，降低后台开销
     }
   });
 
@@ -214,7 +226,30 @@ function createSidebar() {
     sidebar.webContents.openDevTools({ mode: 'detach' });
   }
 
-  setInterval(checkCursor, POLL_INTERVAL);
+  // 鼠标位置轮询：自适应间隔。窗口可见、或 hidden 模式贴边唤出时需灵敏(80ms)；
+  // 其余模式（rail/dock）窗口隐藏进托盘时降频到 500ms，减少后台唤醒与 CPU。
+  const scheduleCursorPoll = () => {
+    if (sidebar.isDestroyed()) return;
+    const needFast = sidebar.isVisible() || uiConfig.mode === 'hidden';
+    setTimeout(() => {
+      try { checkCursor(); } catch { /* 单次采样异常不中断轮询链 */ }
+      scheduleCursorPoll();
+    }, needFast ? POLL_INTERVAL : POLL_IDLE_INTERVAL);
+  };
+  scheduleCursorPoll();
+
+  // 向渲染层广播窗口可见性：隐藏时暂停 60s 全量重绘 / 系统采样 / 天气，显示时补刷
+  sidebar.on('show', () => {
+    if (!sidebar.isDestroyed()) sidebar.webContents.send('window-visible', true);
+  });
+  sidebar.on('hide', () => {
+    if (!sidebar.isDestroyed()) sidebar.webContents.send('window-visible', false);
+  });
+  sidebar.webContents.on('did-finish-load', () => {
+    if (!sidebar.isDestroyed()) {
+      sidebar.webContents.send('window-visible', sidebar.isVisible());
+    }
+  });
 
   // 关闭窗口 → 隐藏进托盘（托盘左键/菜单可再次唤起；真正退出走托盘"退出"）
   sidebar.on('close', (e) => {
