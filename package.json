@@ -42,7 +42,7 @@
       "icon": "build/icon.png"
     },
     "dmg": {
-      "artifactName": "日程侧边栏-${version}-mac-${arch}.dmg"
+      "artifactName": "TimetableSidebar-${version}-mac-${arch}.dmg"
     }
   },
   "devDependencies": {
