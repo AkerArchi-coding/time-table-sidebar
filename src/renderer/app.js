@@ -364,6 +364,9 @@ function buildTaskForm(opts = {}) {
     <div class="add-form-row1">
       <input type="time" class="ev-time" value="${ev ? (ev.time || '') : ''}" />
       <input type="text" class="ev-title" placeholder="事项标题..." maxlength="40" value="${ev ? escapeHtml(ev.title) : ''}" />
+      <button type="button" class="ev-voice-btn" title="语音输入" aria-label="语音输入" hidden>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 10a2 2 0 0 0 2-2V4a2 2 0 0 0-4 0v4a2 2 0 0 0 2 2z"/><path d="M11 5v3a3 3 0 0 1-6 0V5H4v3a4 4 0 0 0 3 3.9V14H5v1h6v-1H9v-2.1A4 4 0 0 0 12 8V5h-1z"/></svg>
+      </button>
     </div>
     <div class="add-form-row2">
       <select class="ev-category" title="分类">
@@ -430,6 +433,14 @@ function bindDateRangeSync(form) {
 
 // 绑定单个表单的保存/取消/回车
 function bindFormEvents(form) {
+  // 语音输入订阅（关闭表单时统一取消，避免泄漏到下次创建的表单）
+  let voiceUnsub = null, voiceStateUnsub = null, voiceErrUnsub = null;
+  const cleanupVoice = () => {
+    if (voiceUnsub) { try { voiceUnsub(); } catch {} voiceUnsub = null; }
+    if (voiceStateUnsub) { try { voiceStateUnsub(); } catch {} voiceStateUnsub = null; }
+    if (voiceErrUnsub) { try { voiceErrUnsub(); } catch {} voiceErrUnsub = null; }
+  };
+
   const save = () => {
     const title = form.querySelector('.ev-title').value.trim();
     if (!title) return;
@@ -458,6 +469,10 @@ function bindFormEvents(form) {
     closeForm(form);
   };
   const closeForm = (f) => {
+    cleanupVoice();   // 关闭即取消语音订阅 + 停止录音
+    if (window.timetable && window.timetable.voiceStop) {
+      try { window.timetable.voiceStop(); } catch {}
+    }
     // 编辑表单是独立插入的编辑器块：关闭时整块移除
     if (f.dataset.editId) {
       const block = f.closest('.editor-block');
@@ -479,6 +494,51 @@ function bindFormEvents(form) {
     });
     if (window.timetable) window.timetable.setEditing(false);
   };
+
+  // ---- 语音输入按钮（仅当设置开关开启时显示并启用） ----
+  const voiceBtn = form.querySelector('.ev-voice-btn');
+  const titleEl = form.querySelector('.ev-title');
+  if (voiceBtn && titleEl && window.timetable && window.timetable.onVoiceResult) {
+    const st = loadAppSettings();
+    if (st.voiceInputEnabled) voiceBtn.hidden = false;
+
+    voiceBtn.addEventListener('click', async () => {
+      if (!window.timetable.voiceGetStatus || !window.timetable.voiceStart) return;
+      // 正在录音：点击即停止
+      if (voiceBtn.classList.contains('recording')) {
+        window.timetable.voiceStop();
+        return;
+      }
+      // 检查可用性
+      let status;
+      try { status = await window.timetable.voiceGetStatus(); }
+      catch { status = { available: false, message: '语音输入不可用' }; }
+      if (!status.available) { showToast(status.message || '语音输入不可用'); return; }
+      // 启动识别
+      voiceBtn.classList.add('recording');
+      window.timetable.voiceStart({ language: st.voiceLanguage || 'zh-CN' });
+    });
+
+    // 识别结果 → 填入标题（仅当前可见表单接收）
+    voiceUnsub = window.timetable.onVoiceResult((result) => {
+      if (form.classList.contains('hidden')) return;
+      if (!result || !result.text) return;
+      titleEl.value = result.text;
+      titleEl.focus();
+      voiceBtn.classList.remove('recording');
+    });
+    // 状态变化 → 按钮态
+    voiceStateUnsub = window.timetable.onVoiceState((state) => {
+      if (state === 'idle' || state === 'error') voiceBtn.classList.remove('recording');
+      else if (state === 'processing' || state === 'recording') voiceBtn.classList.add('recording');
+    });
+    // 错误提示
+    voiceErrUnsub = window.timetable.onVoiceError((err) => {
+      voiceBtn.classList.remove('recording');
+      if (err && err.message) showToast(err.message);
+    });
+  }
+
 
   form.querySelector('.save').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -3440,6 +3500,13 @@ function buildSettings(panel) {
         </span>
         <span class="set-switch"><input type="checkbox" class="set-clip-input"><span class="set-slider"></span></span>
       </label>
+      <label class="set-row">
+        <span class="set-text">
+          <span class="set-name">语音输入</span>
+          <span class="set-desc">事项标题旁显示麦克风按钮，使用 Windows 内置识别（离线，仅本机）</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-voice-input"><span class="set-slider"></span></span>
+      </label>
     </div>
     <div class="set-about">日程侧边栏 v0.1.0<br>所有数据仅保存在本机</div>
   `;
@@ -3454,6 +3521,18 @@ function buildSettings(panel) {
     saveAppSettings(s);
     if (window.timetable) window.timetable.clipboardEnabled(clipSwitch.checked);
     showToast(clipSwitch.checked ? '剪贴板历史已开启' : '剪贴板历史已暂停');
+  });
+
+  // 语音输入开关（默认关；切换即时生效到所有已存在的表单麦克风按钮）
+  const voiceSwitch = panel.querySelector('.set-voice-input');
+  voiceSwitch.checked = st.voiceInputEnabled === true;
+  voiceSwitch.addEventListener('change', () => {
+    const s = loadAppSettings();
+    s.voiceInputEnabled = voiceSwitch.checked;
+    saveAppSettings(s);
+    // 立即更新所有已存在的麦克风按钮显隐
+    weekList.querySelectorAll('.ev-voice-btn').forEach(btn => { btn.hidden = !voiceSwitch.checked; });
+    showToast(voiceSwitch.checked ? '语音输入已开启（仅 Windows 内置识别）' : '语音输入已关闭');
   });
 
   // 开机自动启动（状态实时读系统，避免与注册表/登录项不一致）

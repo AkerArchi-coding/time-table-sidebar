@@ -331,6 +331,36 @@ html, body {
 .add-form input.ev-title { flex: 1; min-width: 0; }
 .add-form input.ev-time { flex: 0 0 auto; width: 70px; }
 .add-form input:focus { outline: none; border-color: #4a90d9; }
+/* 语音输入按钮：默认隐藏，仅当设置开启时由 JS 移除 hidden */
+.ev-voice-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.ev-voice-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.ev-voice-btn:focus { outline: none; border-color: #4a90d9; }
+/* 录音中：红色脉冲 */
+.ev-voice-btn.recording {
+  background: rgba(220, 70, 70, 0.25);
+  border-color: rgba(220, 70, 70, 0.7);
+  color: #ff8080;
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 70, 70, 0.4); }
+  50%      { box-shadow: 0 0 0 4px rgba(220, 70, 70, 0); }
+}
+.ev-voice-btn[hidden] { display: none; }
 /* 第二行：分类 + 紧急程度 */
 .add-form-row2 {
   display: flex;

@@ -5,6 +5,7 @@ const os = require('os');
 const https = require('https');
 const http = require('http');
 const koffi = require('koffi');
+const { spawn } = require('child_process');
 
 let sidebar = null;            // 侧边栏主窗口
 let expanded = false;          // 当前是否展开
@@ -616,28 +617,124 @@ ipcMain.on('autostart-set', (_e, on) => {
   } catch { /* 个别环境（便携目录权限等）设置失败时静默 */ }
 });
 
-// ============ 语音输入 IPC 占位 ============
-// 预留接口：当前只返回 not_implemented 状态，不调用麦克风。
-// 未来接入 VoiceService（src/services/voice/VoiceService.js）后替换为真实实现。
-// 隐私约束：未接入真实识别前，不收集/不传输任何音频数据。
-const VOICE_STATE_IDLE = 'idle';
-const VOICE_ERROR_NOT_IMPLEMENTED = { code: 'not_implemented', message: '语音输入尚未启用' };
+// ============ 语音输入（Windows SAPI 5，System.Speech） ============
+// 通过 PowerShell 子进程调用 SAPI，stdin 发指令、stdout 收 JSON 结果。
+// 隐私：SAPI 在本机识别，音频不出本机；PS 子进程退出即释放资源。
+const VOICE_PS_PATH = path.join(__dirname, 'services', 'voice', 'sapi-recognizer.ps1');
+let voiceProc = null;            // 当前 PS 子进程（启动后保留，复用多次识别）
+let voiceState = 'idle';         // 当前状态：idle / recording / processing / error
+let voiceLang = 'zh-CN';
 
-ipcMain.handle('voice-status', async () => ({
-  state: VOICE_STATE_IDLE,
-  available: false,
-  message: '语音输入尚未实现（架构预留）'
-}));
-
-ipcMain.on('voice-start', (_e, _options) => {
-  // 预留：未来由 VoiceService.start(options) 实现
+function voiceSend(channel, payload) {
   if (sidebar && !sidebar.isDestroyed()) {
-    sidebar.webContents.send('voice-error', VOICE_ERROR_NOT_IMPLEMENTED);
+    sidebar.webContents.send(channel, payload);
   }
+}
+function voiceSetState(state) {
+  voiceState = state;
+  voiceSend('voice-state', state);
+}
+function voiceKillProc() {
+  if (voiceProc) {
+    try { voiceProc.stdin && voiceProc.stdin.end(); } catch {}
+    try { voiceProc.kill(); } catch {}
+    voiceProc = null;
+  }
+}
+
+ipcMain.handle('voice-status', async () => {
+  // Windows：脚本存在即视为可用；非 Windows 不支持
+  const available = process.platform === 'win32' && fs.existsSync(VOICE_PS_PATH);
+  return {
+    state: voiceState,
+    available,
+    message: available ? '' : (process.platform === 'win32' ? '语音识别脚本缺失' : '当前平台不支持语音输入（仅 Windows）')
+  };
+});
+
+ipcMain.on('voice-start', (_e, options) => {
+  if (process.platform !== 'win32') {
+    voiceSend('voice-error', { code: 'platform_unsupported', message: '当前平台不支持语音输入（仅 Windows）' });
+    return;
+  }
+  if (!fs.existsSync(VOICE_PS_PATH)) {
+    voiceSend('voice-error', { code: 'not_installed', message: '语音识别脚本缺失' });
+    return;
+  }
+  voiceLang = (options && options.language) || 'zh-CN';
+
+  // 已有进程：复用，发送 start 指令触发单次识别
+  if (voiceProc && !voiceProc.killed && voiceProc.stdin && !voiceProc.stdin.destroyed) {
+    try {
+      voiceProc.stdin.write('start\n');
+      voiceSetState('processing');
+    } catch {
+      voiceKillProc();
+      // 下方会重启
+    }
+    if (voiceProc) return;
+  }
+
+  // 启动新 PS 子进程
+  try {
+    voiceProc = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive',
+      '-File', VOICE_PS_PATH,
+      '-Lang', voiceLang
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    voiceSend('voice-error', { code: 'spawn_failed', message: String(e && e.message || e) });
+    voiceSetState('error');
+    return;
+  }
+
+  let buf = '';
+  voiceProc.stdout.on('data', (chunk) => {
+    buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.event === 'ready') {
+          // 进程就绪：发送 start 触发首次识别
+          try { voiceProc.stdin.write('start\n'); } catch {}
+          voiceSetState('processing');
+        } else if (msg.event === 'recognized') {
+          voiceSend('voice-result', { text: msg.text, isFinal: true, confidence: msg.confidence || 0 });
+          voiceSetState('idle');
+        } else if (msg.event === 'no_speech') {
+          voiceSend('voice-error', { code: 'no_speech', message: '未识别到语音' });
+          voiceSetState('idle');
+        } else if (msg.event === 'error') {
+          voiceSend('voice-error', { code: 'recognize_failed', message: msg.error || '识别失败' });
+          voiceSetState('idle');   // 单次识别失败不致命，保留进程待下次
+        } else if (msg.event === 'fatal') {
+          voiceSend('voice-error', { code: 'recognize_failed', message: msg.error || '引擎初始化失败' });
+          voiceSetState('error');
+          voiceKillProc();
+        }
+      } catch { /* 非 JSON 行忽略 */ }
+    }
+  });
+  voiceProc.stderr.on('data', () => { /* PS 诊断信息，不暴露给渲染层 */ });
+  voiceProc.on('exit', () => {
+    if (voiceState !== 'error') voiceSetState('idle');
+    voiceProc = null;
+  });
+  voiceProc.on('error', (err) => {
+    voiceSend('voice-error', { code: 'proc_error', message: String(err && err.message || err) });
+    voiceSetState('error');
+    voiceProc = null;
+  });
 });
 
 ipcMain.on('voice-stop', () => {
-  // 预留：未来由 VoiceService.stop() 实现
+  // 同步识别模式无法中断单次识别；kill 子进程以强制结束，下次 start 会重启
+  voiceKillProc();
+  voiceSetState('idle');
 });
 
 // ============ 系统托盘 ============
