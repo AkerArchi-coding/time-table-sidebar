@@ -75,6 +75,15 @@ contextBridge.exposeInMainWorld('timetable', {
     ipcRenderer.on('data-migrate-restore', handler);
     return () => ipcRenderer.removeListener('data-migrate-restore', handler);
   },
+  // 扫码配对 / 局域网同步（预留接口，主进程返回 not_implemented）
+  syncPairStart: () => ipcRenderer.invoke('sync-pair-start'),
+  syncPairScan: () => ipcRenderer.invoke('sync-pair-scan'),
+  syncSend: (payload) => ipcRenderer.invoke('sync-send', payload),
+  onSyncReceive: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('sync-receive', handler);
+    return () => ipcRenderer.removeListener('sync-receive', handler);
+  },
   // 语音输入（Windows SAPI 5 本机识别；非 Windows 平台返回 platform_unsupported）
   voiceGetStatus: () => ipcRenderer.invoke('voice-status'),
   voiceStart: (options) => ipcRenderer.send('voice-start', options || {}),

@@ -508,6 +508,14 @@ ipcMain.handle('data-dir-migrate', async (e, backup) => {
   return { ok: true, newDir, needRestart: true };
 });
 
+// ============ 扫码配对 / 局域网同步（预留接口，暂未实现实际网络通信） ============
+// 这些 handler 仅返回 not_implemented，为未来局域网点对点同步预留数据结构与调用入口。
+const SYNC_NOT_IMPL = { ok: false, code: 'not_implemented', hint: '局域网同步功能开发中，当前仅预留接口' };
+ipcMain.handle('sync-pair-start', () => SYNC_NOT_IMPL);
+ipcMain.handle('sync-pair-scan', () => SYNC_NOT_IMPL);
+ipcMain.handle('sync-send', () => SYNC_NOT_IMPL);
+ipcMain.handle('sync-receive-cb', () => SYNC_NOT_IMPL);
+
 // ============ 天气（主进程发起 HTTPS，绕开渲染层 CSP；免 Key 服务） ============
 function requestJson(url, timeoutMs = 7000) {
   return new Promise((resolve, reject) => {

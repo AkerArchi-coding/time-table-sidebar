@@ -117,6 +117,13 @@ function loadEvents() {
       if (ev.startDate && ev.endDate && ev.endDate < ev.startDate) {
         const t = ev.startDate; ev.startDate = ev.endDate; ev.endDate = t;
       }
+      // 番茄钟累计完成数（绑定事项后，每完成一个专注 +1）
+      if (ev.pomoCount === undefined) ev.pomoCount = 0;
+      // 提醒：提前分钟数 / 贪睡截止时间戳
+      if (ev.remindAhead === undefined) ev.remindAhead = 0;
+      if (ev.snoozeUntil === undefined) ev.snoozeUntil = 0;
+      // 同步预留：最后同步时间
+      if (ev.lastSyncAt === undefined) ev.lastSyncAt = '';
     }
     eventsCache = list;
     return list;
@@ -353,6 +360,7 @@ function buildTaskForm(opts = {}) {
   const preCategory = ev ? (ev.category || 'work') : 'work';
   const preUrgency = ev ? (ev.urgency || 'normal') : 'normal';
   const preProject = ev ? (ev.projectId || '') : '';
+  const preRemind = ev ? (ev.remindAhead || 0) : 0;
 
   const sel = (val, cur) => val === cur ? ' selected' : '';
   const form = document.createElement('div');
@@ -388,6 +396,11 @@ function buildTaskForm(opts = {}) {
     </div>
     <div class="add-form-row-dur">持续
       <input type="number" class="ev-dur" min="1" step="1" value="${preDur}" title="修改持续天数自动调整结束日期" /> 天
+    </div>
+    <div class="add-form-row-remind">提前提醒
+      <select class="ev-remind" title="到达前多少分钟提醒（仅当设置了时间）">
+        ${[0, 5, 10, 15, 30].map(m => `<option value="${m}"${sel(String(m), String(preRemind))}>${m === 0 ? '不提前' : m + ' 分钟前'}</option>`).join('')}
+      </select>
     </div>
     <div class="add-form-row3">
       <button class="cancel">取消</button>
@@ -462,7 +475,8 @@ function bindFormEvents(form) {
       time, title,
       category: category || 'work',
       urgency: urgency || 'normal',
-      projectId
+      projectId,
+      remindAhead: Number(form.querySelector('.ev-remind').value) || 0
     };
     if (form.dataset.editId) updateEvent(form.dataset.editId, fields);
     else addEvent(fields);
@@ -491,6 +505,7 @@ function bindFormEvents(form) {
       if (s.classList.contains('ev-category')) s.value = 'work';
       else if (s.classList.contains('ev-urgency')) s.value = 'normal';
       else if (s.classList.contains('ev-project')) s.value = '';
+      else if (s.classList.contains('ev-remind')) s.value = '0';
     });
     if (window.timetable) window.timetable.setEditing(false);
   };
@@ -1097,7 +1112,12 @@ function buildProjectInline(p) {
 }
 
 // ============ 甘特图（项目内联 & 日历总览共用） ============
-const GANTT_DAY_W = 28;    // 甘特图单日列宽 px
+const GANTT_STATE = { dayW: 28 };   // 甘特图单日列宽 px（可变：缩放 16~56）
+const GANTT_DAY_W_MIN = 16, GANTT_DAY_W_MAX = 56, GANTT_DAY_W_STEP = 4;
+// 缩放边界收敛（工具栏按钮与 Ctrl+滚轮共用；独立成纯函数便于单元测试）
+function ganttClampDayW(w) {
+  return Math.min(GANTT_DAY_W_MAX, Math.max(GANTT_DAY_W_MIN, w));
+}
 const GANTT_ROW_H = 30;    // 甘特图事项行高 px
 const GANTT_GROUP_H = 24;  // 甘特图项目分组行高 px（总览）
 const GANTT_HEAD_H = 30;   // 甘特图表头高 px
@@ -1127,7 +1147,7 @@ function buildGantt(project) {
   const tk = dateKey(today());
   const { minK, totalDays } = calcGanttRange(tasks.map(t => [eventStart(t), eventEnd(t)]));
   const todayOffset = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
-  const innerW = totalDays * GANTT_DAY_W;
+  const innerW = totalDays * GANTT_STATE.dayW;
   const WEEK_CH = '日一二三四五六';
 
   const wrap = document.createElement('div');
@@ -1149,7 +1169,7 @@ function buildGantt(project) {
   for (let i = 0; i < totalDays; i++) {
     const d = addDays(parseDateKey(minK), i);
     const key = dateKey(d);
-    headHtml += `<div class="gh-day${key === tk ? ' today' : ''}" style="width:${GANTT_DAY_W}px;flex:0 0 ${GANTT_DAY_W}px">
+    headHtml += `<div class="gh-day${key === tk ? ' today' : ''}" style="width:${GANTT_STATE.dayW}px;flex:0 0 ${GANTT_STATE.dayW}px">
       ${d.getMonth() + 1}/${d.getDate()}<span class="gh-wk">${WEEK_CH[d.getDay()]}</span>
     </div>`;
   }
@@ -1166,7 +1186,7 @@ function buildGantt(project) {
       rowsHtml += `
         <div class="gantt-row" style="height:${GANTT_ROW_H}px">
           <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
-               style="left:${off * GANTT_DAY_W + 1}px;width:${dur * GANTT_DAY_W - 3}px;background:${cat.color}55;border-left-color:${cat.color}"
+               style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${cat.color}55;border-left-color:${cat.color}"
                title="${escapeHtml(t.title)}（${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
             <span class="bar-title">${escapeHtml(t.title)}</span>
             <span class="bar-resize"></span>
@@ -1183,7 +1203,7 @@ function buildGantt(project) {
           <div class="gantt-head" style="height:${GANTT_HEAD_H}px">${headHtml}</div>
           <div class="gantt-body">
             ${todayOffset >= 0 && todayOffset < totalDays
-              ? `<div class="gantt-today-line" style="left:${todayOffset * GANTT_DAY_W + GANTT_DAY_W / 2}px"></div>` : ''}
+              ? `<div class="gantt-today-line" style="left:${todayOffset * GANTT_STATE.dayW + GANTT_STATE.dayW / 2}px"></div>` : ''}
             ${rowsHtml}
           </div>
         </div>
@@ -1204,6 +1224,7 @@ function buildGantt(project) {
   }
 
   bindGanttDrag(wrap);
+  setupGanttControls(wrap);
   return wrap;
 }
 
@@ -1263,7 +1284,7 @@ function buildOverviewGantt() {
   const tk = dateKey(today());
   const { minK, totalDays } = calcGanttRange(ranges);
   const todayOffset = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
-  const innerW = totalDays * GANTT_DAY_W;
+  const innerW = totalDays * GANTT_STATE.dayW;
   const WEEK_CH = '日一二三四五六';
   wrap.dataset.minKey = minK;
 
@@ -1285,7 +1306,7 @@ function buildOverviewGantt() {
       const off = Math.round((parseDateKey(s) - parseDateKey(minK)) / 86400000);
       const dur = durationDays(s, e);
       rowsHtml += `<div class="gantt-pj-range"
-        style="left:${off * GANTT_DAY_W + 1}px;width:${dur * GANTT_DAY_W - 3}px;background:${cat.color}26;border-left-color:${cat.color}"
+        style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${cat.color}26;border-left-color:${cat.color}"
         title="${escapeHtml(gname)}（${fmtShort(s)}~${fmtShort(e)}，${dur}天）"></div>`;
     }
     rowsHtml += `</div>`;
@@ -1304,7 +1325,7 @@ function buildOverviewGantt() {
         rowsHtml += `
           <div class="gantt-row" style="height:${GANTT_ROW_H}px">
             <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
-                 style="left:${off * GANTT_DAY_W + 1}px;width:${dur * GANTT_DAY_W - 3}px;background:${tcat.color}55;border-left-color:${tcat.color}"
+                 style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${tcat.color}55;border-left-color:${tcat.color}"
                  title="${escapeHtml(t.title)}（${pjPrefix}${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
               <span class="bar-title">${escapeHtml(t.title)}</span>
               <span class="bar-resize"></span>
@@ -1319,7 +1340,7 @@ function buildOverviewGantt() {
   for (let i = 0; i < totalDays; i++) {
     const d = addDays(parseDateKey(minK), i);
     const key = dateKey(d);
-    headHtml += `<div class="gh-day${key === tk ? ' today' : ''}" style="width:${GANTT_DAY_W}px;flex:0 0 ${GANTT_DAY_W}px">
+    headHtml += `<div class="gh-day${key === tk ? ' today' : ''}" style="width:${GANTT_STATE.dayW}px;flex:0 0 ${GANTT_STATE.dayW}px">
       ${d.getMonth() + 1}/${d.getDate()}<span class="gh-wk">${WEEK_CH[d.getDay()]}</span>
     </div>`;
   }
@@ -1332,7 +1353,7 @@ function buildOverviewGantt() {
           <div class="gantt-head" style="height:${GANTT_HEAD_H}px">${headHtml}</div>
           <div class="gantt-body">
             ${todayOffset >= 0 && todayOffset < totalDays
-              ? `<div class="gantt-today-line" style="left:${todayOffset * GANTT_DAY_W + GANTT_DAY_W / 2}px"></div>` : ''}
+              ? `<div class="gantt-today-line" style="left:${todayOffset * GANTT_STATE.dayW + GANTT_STATE.dayW / 2}px"></div>` : ''}
             ${rowsHtml}
           </div>
         </div>
@@ -1344,6 +1365,7 @@ function buildOverviewGantt() {
   appendUndated();
 
   bindGanttDrag(wrap);
+  setupGanttControls(wrap);
   return wrap;
 }
 
@@ -1361,21 +1383,21 @@ function bindGanttDrag(wrap) {
       let moved = false;
 
       const onMove = (ev2) => {
-        const deltaDays = Math.round((ev2.clientX - startX) / GANTT_DAY_W);
+        const deltaDays = Math.round((ev2.clientX - startX) / GANTT_STATE.dayW);
         if (deltaDays === 0) return;
         moved = true;
         bar.classList.add('dragging');
         if (resize) {
           const newEnd = addDaysKey(origEnd, deltaDays);
           if (newEnd < origStart) return;
-          bar.style.width = (durationDays(origStart, newEnd) * GANTT_DAY_W - 3) + 'px';
+          bar.style.width = (durationDays(origStart, newEnd) * GANTT_STATE.dayW - 3) + 'px';
           bar.dataset.dragEnd = newEnd;
         } else {
           const newStart = addDaysKey(origStart, deltaDays);
           const newEnd = addDaysKey(origEnd, deltaDays);
           const baseStart = wrap.dataset.minKey;
           const off = Math.round((parseDateKey(newStart) - parseDateKey(baseStart)) / 86400000);
-          bar.style.left = (off * GANTT_DAY_W + 1) + 'px';
+          bar.style.left = (off * GANTT_STATE.dayW + 1) + 'px';
           bar.dataset.dragStart = newStart;
           bar.dataset.dragEnd = newEnd;
         }
@@ -1413,6 +1435,62 @@ function bindGanttDrag(wrap) {
       if (ev) openTaskEditor(ev);
     });
   });
+}
+
+// 甘特图交互增强：缩放工具栏 + 滚轮横向滚动 + Ctrl+滚轮缩放 + 回到今天
+function setupGanttControls(wrap) {
+  const gantt = wrap.querySelector('.gantt');
+  if (!gantt) return;
+  const right = wrap.querySelector('.gantt-right');
+  const minK = wrap.dataset.minKey;
+
+  // 工具栏
+  const toolbar = document.createElement('div');
+  toolbar.className = 'gantt-toolbar';
+  toolbar.innerHTML = `
+    <button type="button" class="gantt-zoom-btn" data-act="out" title="缩小">－</button>
+    <span class="gantt-zoom-label">${GANTT_STATE.dayW}px</span>
+    <button type="button" class="gantt-zoom-btn" data-act="in" title="放大">＋</button>
+    <button type="button" class="gantt-today-btn" title="回到今天">今天</button>
+  `;
+  wrap.insertBefore(toolbar, gantt);
+
+  const label = toolbar.querySelector('.gantt-zoom-label');
+  const rebuild = () => { render(); };   // 缩放后整体重渲染以重算列宽
+  toolbar.querySelector('[data-act="in"]').addEventListener('click', () => {
+    GANTT_STATE.dayW = ganttClampDayW(GANTT_STATE.dayW + GANTT_DAY_W_STEP);
+    label.textContent = GANTT_STATE.dayW + 'px';
+    rebuild();
+  });
+  toolbar.querySelector('[data-act="out"]').addEventListener('click', () => {
+    GANTT_STATE.dayW = ganttClampDayW(GANTT_STATE.dayW - GANTT_DAY_W_STEP);
+    label.textContent = GANTT_STATE.dayW + 'px';
+    rebuild();
+  });
+  toolbar.querySelector('.gantt-today-btn').addEventListener('click', () => {
+    if (!right || !minK) return;
+    const tk = dateKey(today());
+    const off = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
+    right.scrollLeft = off * GANTT_STATE.dayW - right.clientWidth / 2;
+  });
+
+  // 滚轮：横向滚动；Ctrl+滚轮缩放
+  if (right) {
+    right.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      if (e.ctrlKey) {
+        const dir = e.deltaY > 0 ? -1 : 1;
+        const newW = GANTT_STATE.dayW + dir * GANTT_DAY_W_STEP;
+        if (ganttClampDayW(newW) === newW) {   // 步进后仍在 16~56 边界内才生效
+          GANTT_STATE.dayW = newW;
+          label.textContent = GANTT_STATE.dayW + 'px';
+          rebuild();
+        }
+      } else {
+        right.scrollLeft += e.deltaY || e.deltaX || 0;
+      }
+    }, { passive: false });
+  }
 }
 
 // 事项编辑器：在当前视图顶部插入编辑表单块
@@ -1644,6 +1722,27 @@ function loadSyncBases() {
 }
 function saveSyncBases(bases) {
   localStorage.setItem('syncBases', JSON.stringify(bases));
+}
+
+// ---- 设备标识与配对列表（局域网同步预留） ----
+// deviceId：本机唯一标识（UUID v4），首次启动生成后持久化
+function getDeviceId() {
+  let id = localStorage.getItem('deviceId');
+  if (!id) {
+    id = 'dev-' + 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+    localStorage.setItem('deviceId', id);
+  }
+  return id;
+}
+// 已配对设备列表：[{deviceId, name, platform, pairedAt, status}]
+function loadSyncPairs() {
+  try { return JSON.parse(localStorage.getItem('syncPairs') || '[]'); } catch { return []; }
+}
+function saveSyncPairs(pairs) {
+  localStorage.setItem('syncPairs', JSON.stringify(pairs));
 }
 
 // ---- 同步操作日志（localStorage: syncLog，最新在前，上限 200 条） ----
@@ -2523,6 +2622,35 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+// 事项提醒 toast：含「贪睡 5 分钟」按钮
+function showReminderToast(ev, aheadMin) {
+  let t = document.querySelector('.toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.className = 'toast';
+    document.body.appendChild(t);
+  }
+  const prefix = aheadMin > 0 ? `提前 ${aheadMin} 分钟提醒：` : '到点提醒：';
+  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><button class="toast-snooze" type="button">贪睡 5 分钟</button>`;
+  t.classList.add('show', 'toast-remind');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
+  const btn = t.querySelector('.toast-snooze');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const list = loadEvents();
+      const e = list.find(x => x.id === ev.id);
+      if (e) { e.snoozeUntil = Date.now() + 5 * 60 * 1000; saveEvents(list); }
+      // 移除已提醒标记，使贪睡到期后可再次触发
+      const key = ev.id + '|' + dateKey(today());
+      remindedKeys.delete(key);
+      saveRemindedKeys();
+      t.classList.remove('show');
+      showToast('已贪睡 5 分钟后再次提醒');
+    });
+  }
+}
+
 // ============ 系统合成音（Web Audio 振荡器，无音频文件依赖，失败静默） ============
 let audioCtx = null;
 // pattern: [频率Hz, 起始偏移s, 持续s] 数组
@@ -2569,21 +2697,35 @@ function checkReminders() {
   const now = new Date();
   const tk = dateKey(now);
   if (tk !== remindedDate) { remindedDate = tk; remindedKeys.clear(); }   // 跨日重置
-  const hm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
   for (const ev of loadEvents()) {
     if (ev.done || !ev.time || eventStart(ev) !== tk) continue;
-    if (ev.time !== hm) continue;
     const key = ev.id + '|' + tk;
     if (remindedKeys.has(key)) continue;
+    // 触发时间 = 到点时间 - 提前提醒分钟数
+    const [h, m] = ev.time.split(':').map(Number);
+    const trigger = new Date(now);
+    trigger.setHours(h, m, 0, 0);
+    const aheadMin = ev.remindAhead || 0;
+    trigger.setMinutes(trigger.getMinutes() - aheadMin);
+    // 贪睡中：未到 snoozeUntil 则跳过
+    if (ev.snoozeUntil && now.getTime() < ev.snoozeUntil) continue;
+    if (now.getTime() < trigger.getTime()) continue;   // 未到触发时间
+    // 触发提醒
     remindedKeys.add(key);
     saveRemindedKeys();
+    // 清除已消费的贪睡标记
+    if (ev.snoozeUntil) {
+      const list = loadEvents();
+      const e = list.find(x => x.id === ev.id);
+      if (e) { e.snoozeUntil = 0; saveEvents(list); }
+    }
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        new Notification('日程到点提醒', { body: `${ev.time} ${ev.title}` });
+        new Notification('日程提醒', { body: `${ev.time} ${ev.title}${aheadMin > 0 ? `（提前 ${aheadMin} 分钟）` : ''}` });
       }
     } catch { /* 通知不可用时仅响铃 */ }
     playChime(CHIME.remind);
-    showToast('到点提醒：' + ev.title);
+    showReminderToast(ev, aheadMin);
   }
 }
 
@@ -2693,7 +2835,9 @@ const POMO = {
   remainMs: 25 * 60000,   // 暂停时：剩余毫秒
   timerId: null,
   doneToday: 0,
-  doneDate: ''
+  doneDate: '',
+  taskId: null,           // 绑定的事项 ID（null 表示未绑定）
+  taskTitle: ''           // 绑定事项标题（仅显示用）
 };
 // 时长/周期配置持久化（今日完成数已有 pomoStats，这里只存偏好）
 function loadPomoCfg() {
@@ -2723,6 +2867,34 @@ function savePomoStats() {
   localStorage.setItem('pomoStats', JSON.stringify({ date: dateKey(today()), count: POMO.doneToday }));
 }
 loadPomoStats();
+
+// 番茄钟事项日志：按日记录每个绑定事项的专注次数（key: pomoTaskLogs）
+function loadPomoTaskLogs() {
+  try {
+    const o = JSON.parse(localStorage.getItem('pomoTaskLogs') || '{}');
+    if (o.date === dateKey(today()) && Array.isArray(o.logs)) return o.logs;
+  } catch { /* 无日志 */ }
+  return [];
+}
+function savePomoTaskLogs(logs) {
+  localStorage.setItem('pomoTaskLogs', JSON.stringify({ date: dateKey(today()), logs }));
+}
+function appendPomoTaskLog(taskId, taskTitle, minutes) {
+  const logs = loadPomoTaskLogs();
+  logs.push({ taskId, taskTitle, minutes, ts: new Date().toISOString() });
+  savePomoTaskLogs(logs);
+}
+
+// 专注自然完成时同步绑定事项：pomoCount 累计 + 写入当日事项日志（pomoTick 调用；独立成函数便于单元测试）
+function pomoBindComplete() {
+  if (!POMO.taskId) return;
+  const list = loadEvents();
+  const ev = list.find(x => x.id === POMO.taskId);
+  if (!ev) return;
+  ev.pomoCount = (ev.pomoCount || 0) + 1;
+  saveEvents(list);
+  appendPomoTaskLog(POMO.taskId, POMO.taskTitle || ev.title, POMO.workMin);
+}
 
 function pomoFmt(ms) {
   const s = Math.max(0, Math.ceil(ms / 1000));
@@ -2758,6 +2930,7 @@ function pomoTick() {
     POMO.doneToday += 1;
     if (POMO.doneDate !== dateKey(today())) { POMO.doneToday = 1; POMO.doneDate = dateKey(today()); }
     savePomoStats();
+    pomoBindComplete();   // 绑定事项：累计 pomoCount 并写入当日事项日志
     pomoEnterBreak();
     POMO.endAt = Date.now() + POMO.remainMs;   // 自动进入休息
     playChime(CHIME.ding);
@@ -2801,6 +2974,7 @@ function pomoReset() {
   POMO.mode = 'work';
   POMO.session = 0; POMO.isLong = false;   // 重置回全新周期
   POMO.remainMs = pomoPhaseMs();
+  POMO.taskId = null; POMO.taskTitle = '';  // 重置同时解除事项绑定
   if (POMO.timerId) { clearInterval(POMO.timerId); POMO.timerId = null; }
   pomoPaint(true);
 }
@@ -2850,7 +3024,21 @@ function pomoCycleDots() {
 
 function buildPomodoro(panel) {
   const nextPos = Math.min(POMO.session + 1, POMO.cycle);
+  // 事项绑定下拉：未完成事项
+  const pendingTasks = loadEvents().filter(e => !e.done);
+  const taskOpts = pendingTasks.map(t =>
+    `<option value="${t.id}"${POMO.taskId === t.id ? ' selected' : ''}>${escapeHtml(t.title)}${t.startDate ? `（${fmtShort(t.startDate)}）` : ''}</option>`
+  ).join('');
   panel.innerHTML = `
+    <div class="pomo-bind">
+      <label class="pomo-bind-label">绑定事项
+        <select class="pomo-task">
+          <option value="">— 不绑定 —</option>
+          ${taskOpts}
+        </select>
+      </label>
+      ${POMO.taskId ? `<span class="pomo-bind-tag" title="已绑定：${escapeHtml(POMO.taskTitle)}">🍅 ${escapeHtml(POMO.taskTitle)}</span>` : ''}
+    </div>
     <div class="pomo-stage">
       <div class="pomo-mode">${pomoStatusLabel()}</div>
       <div class="pomo-time">${pomoFmt(POMO.remainMs)}</div>
@@ -2891,6 +3079,17 @@ function buildPomodoro(panel) {
   panel.querySelector('.pomo-toggle').addEventListener('click', () => POMO.running ? pomoPause() : pomoStart());
   panel.querySelector('.pomo-reset').addEventListener('click', pomoReset);
   panel.querySelector('.pomo-skip').addEventListener('click', pomoSkip);
+  // 事项绑定：切换下拉即更新 POMO.taskId
+  panel.querySelector('.pomo-task').addEventListener('change', (e) => {
+    const id = e.target.value;
+    if (!id) { POMO.taskId = null; POMO.taskTitle = ''; }
+    else {
+      const t = loadEvents().find(x => x.id === id);
+      POMO.taskId = id;
+      POMO.taskTitle = t ? t.title : '';
+    }
+    pomoPaint(true);
+  });
   panel.querySelector('.pomo-work').addEventListener('change', (e) => {
     POMO.workMin = Number(e.target.value);
     if (!POMO.running && POMO.mode === 'work') POMO.remainMs = pomoPhaseMs();
@@ -3546,6 +3745,22 @@ function buildSettings(panel) {
         <button type="button" class="set-btn" id="backupImportBtn">导入</button>
       </div>
     </div>
+    <div class="set-group">
+      <div class="set-group-title">设备同步</div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">本机设备 ID</span>
+          <span class="set-desc" id="deviceIdDisplay">—</span>
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">局域网同步</span>
+          <span class="set-desc">预留功能，当前版本暂未开放</span>
+        </span>
+        <button type="button" class="set-btn" id="syncPairBtn">配对新设备</button>
+      </div>
+    </div>
     <div class="set-about" id="setAbout">日程侧边栏<br>所有数据仅保存在本机</div>
   `;
 
@@ -3746,6 +3961,19 @@ function buildSettings(panel) {
       }
     });
   }
+
+  // ---- 设备同步（预留）：显示 deviceId，配对按钮提示开发中 ----
+  const deviceIdEl = panel.querySelector('#deviceIdDisplay');
+  if (deviceIdEl) deviceIdEl.textContent = getDeviceId();
+  const syncPairBtn = panel.querySelector('#syncPairBtn');
+  if (syncPairBtn && window.timetable && window.timetable.syncPairStart) {
+    syncPairBtn.addEventListener('click', async () => {
+      const res = await window.timetable.syncPairStart();
+      if (res && res.code === 'not_implemented') {
+        showToast('局域网同步功能开发中，敬请期待');
+      }
+    });
+  }
 }
 
 // ============ 右键上下文菜单 ============
@@ -3848,6 +4076,7 @@ function showEventMenu(x, y, eventId) {
   ctxItems.innerHTML = `
     <div class="ctx-item" data-action="toggle">${doneLabel}</div>
     <div class="ctx-item" data-action="edit">编辑事项</div>
+    <div class="ctx-item" data-action="pomo">开始番茄钟</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-action="move">将完成时间调整到</div>
     <div class="ctx-item" data-action="toProject">调整事项到项目</div>
@@ -3857,6 +4086,11 @@ function showEventMenu(x, y, eventId) {
   bindItemHandlers({
     toggle: () => toggleDone(eventId),
     edit: () => openTaskEditor(ev),
+    pomo: () => {
+      POMO.taskId = eventId;
+      POMO.taskTitle = ev.title;
+      openTool('pomodoro');
+    },
     move: () => openDatePicker('调整到哪一天', eventStart(ev) || dateKey(today()), (pickedDate) => {
       moveEventToDate(eventId, pickedDate);
     }),
@@ -4069,6 +4303,8 @@ if (window.timetable) {
 }
 
 // ============ 初始化 ============
+// 生成本机设备标识（局域网同步预留）
+getDeviceId();
 // 应用设置同步：剪贴板开关下发主进程（关 = 暂停记录）
 if (window.timetable) {
   const bootSt = loadAppSettings();
