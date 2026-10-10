@@ -84,6 +84,14 @@ contextBridge.exposeInMainWorld('timetable', {
     ipcRenderer.on('sync-receive', handler);
     return () => ipcRenderer.removeListener('sync-receive', handler);
   },
+  // 全局快捷键：设置开关（主进程注册/反注册，注册失败返回降级后的实际生效状态）
+  hotkeySet: (partial) => ipcRenderer.invoke('hotkey-set', partial || {}),
+  // 快捷键动作：主进程 → 渲染层（如 Ctrl+Alt+N 打开快速添加）
+  onShortcutAction: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('shortcut-action', handler);
+    return () => ipcRenderer.removeListener('shortcut-action', handler);
+  },
   // 语音输入（Windows SAPI 5 本机识别；非 Windows 平台返回 platform_unsupported）
   voiceGetStatus: () => ipcRenderer.invoke('voice-status'),
   voiceStart: (options) => ipcRenderer.send('voice-start', options || {}),

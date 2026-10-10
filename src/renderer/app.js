@@ -126,6 +126,8 @@ function loadEvents() {
       if (ev.lastSyncAt === undefined) ev.lastSyncAt = '';
       // 重复规则（P3.2）：null = 不重复；命中日由虚拟投影动态生成
       if (ev.recur === undefined) ev.recur = null;
+      // 标签（P3.3）：字符串数组，用于今日/事项视图筛选
+      if (!Array.isArray(ev.tags)) ev.tags = [];
     }
     eventsCache = list;
     return list;
@@ -393,6 +395,34 @@ function render() {
   weekList.scrollTop = scrollPos;
 }
 
+// ============ 事项标签（P3.3）：逗号分隔输入，仅本机筛选用 ============
+const TAG_MAX = 6;        // 单个事项最多标签数
+const TAG_LEN_MAX = 12;   // 单个标签最长字符
+// "工作, 重要，加班" → ['工作','重要','加班']（中英文逗号均支持，去空去重截断）
+function parseTags(str) {
+  const seen = new Set();
+  const out = [];
+  for (let t of String(str || '').split(/[,，]/)) {
+    t = t.trim().slice(0, TAG_LEN_MAX);
+    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+    if (out.length >= TAG_MAX) break;
+  }
+  return out;
+}
+// 汇总所有事项出现过的标签（去重，中文排序）→ 供筛选 chips
+function collectTags() {
+  const seen = new Set();
+  for (const ev of loadEvents()) {
+    for (const t of (ev.tags || [])) seen.add(t);
+  }
+  return Array.from(seen).sort((a, b) => a.localeCompare(b, 'zh'));
+}
+// 按标签筛选事项列表（tag 为空原样返回）
+function filterByTag(list, tag) {
+  if (!tag) return list;
+  return list.filter(ev => Array.isArray(ev.tags) && ev.tags.includes(tag));
+}
+
 // ============ 公共构建器 ============
 // 事项条目（opts.showDate: 显示日期徽标 / opts.showProject: 显示项目徽标）
 function buildEventItem(ev, opts = {}) {
@@ -409,6 +439,15 @@ function buildEventItem(ev, opts = {}) {
     const r = ev.recur;
     const rl = RECUR_FREQ_LABELS[r.freq] || '重复';
     badges += `<span class="event-recur-badge" title="${rl}重复${r.until ? '，至 ' + r.until : ''}">🔁</span>`;
+  }
+  // 标签徽标（P3.3）：最多显示 2 个，超出折叠为 +N（悬停看全量）
+  if (Array.isArray(ev.tags) && ev.tags.length) {
+    const shown = ev.tags.slice(0, 2);
+    badges += shown.map(t => `<span class="event-tag-badge">${escapeHtml(t)}</span>`).join('');
+    if (ev.tags.length > shown.length) {
+      const rest = ev.tags.slice(shown.length).join(', ');
+      badges += `<span class="event-tag-badge tag-more" title="${escapeHtml(rest)}">+${ev.tags.length - shown.length}</span>`;
+    }
   }
   if (opts.showDate) {
     const s = eventStart(ev), e = eventEnd(ev);
@@ -448,6 +487,7 @@ function buildTaskForm(opts = {}) {
   const preRemind = ev ? (ev.remindAhead || 0) : 0;
   const preRecurFreq = ev && ev.recur && RECUR_FREQ_LABELS[ev.recur.freq] ? ev.recur.freq : 'none';
   const preRecurUntil = ev && ev.recur ? (ev.recur.until || '') : '';
+  const preTags = ev && Array.isArray(ev.tags) ? ev.tags.join(',') : '';
 
   const sel = (val, cur) => val === cur ? ' selected' : '';
   const form = document.createElement('div');
@@ -494,6 +534,9 @@ function buildTaskForm(opts = {}) {
         ${Object.keys(RECUR_FREQ_LABELS).map(f => `<option value="${f}"${sel(f, preRecurFreq)}>${RECUR_FREQ_LABELS[f]}</option>`).join('')}
       </select>
       <input type="date" class="ev-recur-until" title="重复截止日期（可留空=一直重复）" value="${preRecurUntil}" />
+    </div>
+    <div class="add-form-row-tags">标签
+      <input type="text" class="ev-tags" title="标签，逗号分隔，最多 ${TAG_MAX} 个" placeholder="如：工作, 重要" value="${escapeHtml(preTags)}" />
     </div>
     <div class="add-form-row3">
       <button class="cancel">取消</button>
@@ -576,6 +619,8 @@ function bindFormEvents(form) {
     fields.recur = (recurFreq === 'none')
       ? null
       : { freq: recurFreq, interval: 1, until: form.querySelector('.ev-recur-until').value || '' };
+    // 标签（P3.3）：逗号分隔解析为去重数组；空串存 []
+    fields.tags = parseTags(form.querySelector('.ev-tags').value);
     if (form.dataset.editId) updateEvent(form.dataset.editId, fields);
     else addEvent(fields);
     closeForm(form);
@@ -608,6 +653,8 @@ function bindFormEvents(form) {
     });
     const recurUntil = f.querySelector('.ev-recur-until');
     if (recurUntil) recurUntil.value = '';
+    const tagsEl = f.querySelector('.ev-tags');
+    if (tagsEl) tagsEl.value = '';
     if (window.timetable) window.timetable.setEditing(false);
   };
 
@@ -943,10 +990,12 @@ function renderToday() {
   if (backBtn) backBtn.addEventListener('click', () => setTodayAnchor(tk));
 
   weekList.innerHTML = '';
+  // 标签筛选 chips（P3.3）：存在标签或筛选进行中（后者保证可退出筛选）时显示
+  if (collectTags().length || tagFilter) weekList.appendChild(buildTagChips());
   // 昨日、聚焦日、明日、后日 共 4 张日期卡（点击卡片头部可切换；排序控件只挂在聚焦卡）
   for (let off = -1; off <= 2; off++) {
     weekList.appendChild(buildDayCard(addDays(d, off), {
-      showSort: off === 0, anchorCard: off === 0, clickable: true
+      showSort: off === 0, anchorCard: off === 0, clickable: true, tagFilter
     }));
   }
   bindViewEvents();
@@ -1038,7 +1087,9 @@ function buildDaySortBar() {
 function buildDayCard(d, opts = {}) {
   const key = dateKey(d);
   const isToday = isSameDay(d, today());
-  const events = getEventsByDate(key);
+  // 标签筛选（P3.3）：仅过滤显示，不影响排序控件/投影数据本身
+  const projEvents = getEventsByDate(key);
+  const events = opts.tagFilter ? filterByTag(projEvents, opts.tagFilter) : projEvents;
 
   const card = document.createElement('div');
   card.className = 'day-card' + (isToday ? ' today' : '') + (opts.anchorCard ? ' selected' : '');
@@ -1614,6 +1665,29 @@ function openTaskEditor(ev) {
 // 批量操作状态（仅事项视图内有效；切换视图/工具时重置）
 let batchMode = false;
 const batchSel = new Set();
+// 标签筛选（P3.3）：'' = 全部；今日视图与事项视图共用，仅影响显示不影响数据
+let tagFilter = '';
+
+// 标签筛选 chips 条（点击切换筛选，再次点击已选项取消）
+function buildTagChips() {
+  const bar = document.createElement('div');
+  bar.className = 'tag-chips';
+  const mk = (label, val, active) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'tag-chip' + (active ? ' active' : '');
+    chip.textContent = label;
+    chip.title = active ? '取消筛选' : `筛选「${label}」相关事项`;
+    chip.addEventListener('click', () => {
+      tagFilter = (tagFilter === val) ? '' : val;
+      render();
+    });
+    return chip;
+  };
+  bar.appendChild(mk('全部', '', !tagFilter));
+  for (const t of collectTags()) bar.appendChild(mk(t, t, tagFilter === t));
+  return bar;
+}
 
 // 批量写公共字段（改分类/改项目/标记完成）；涉及项目变动统一 bump 版本号
 function batchPatchFields(ids, patch) {
@@ -1701,13 +1775,17 @@ function buildBatchBar(all) {
 
 function renderTasks() {
   const all = sortEvents(loadEvents());
-  setHeader('全部事项', batchMode ? `已选 ${batchSel.size} 项` : `共 ${all.length} 项`, false);
+  // 标签筛选（P3.3）：筛选态只改显示集合，批量计数/标题仍基于全量
+  const shown = tagFilter ? filterByTag(all, tagFilter) : all;
+  setHeader('全部事项', batchMode ? `已选 ${batchSel.size} 项` : (tagFilter ? `筛选 ${shown.length}/${all.length} 项` : `共 ${all.length} 项`), false);
   weekList.innerHTML = '';
 
   // 批量模式：置顶操作条，隐藏新建入口避免干扰
   if (batchMode) weekList.appendChild(buildBatchBar(all));
 
   if (!batchMode) {
+    // 标签筛选 chips：存在标签或筛选进行中（后者保证可退出筛选）时显示
+    if (collectTags().length || tagFilter) weekList.appendChild(buildTagChips());
     // 新建事项入口（未固定日期/项目）
     const block = document.createElement('div');
     block.className = 'add-block';
@@ -1730,13 +1808,13 @@ function renderTasks() {
 
   const list = document.createElement('div');
   list.className = 'event-list';
-  if (all.length === 0) {
+  if (shown.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
-    hint.textContent = '— 暂无事项 —';
+    hint.textContent = tagFilter ? `— 无「${tagFilter}」标签事项 —` : '— 暂无事项 —';
     list.appendChild(hint);
   } else {
-    for (const ev of all) {
+    for (const ev of shown) {
       const item = buildEventItem(ev, { showDate: true, showProject: true });
       if (batchMode) {
         // 多选模式：整行点击切换选中；去掉单点控件避免与 bindViewEvents 的绑定冲突
@@ -1772,6 +1850,7 @@ function addEvent(fields, skipRender) {
     projectId: fields.projectId || null,
     description: '',
     recur: fields.recur || null,    // 重复规则（P3.2）：null = 不重复
+    tags: Array.isArray(fields.tags) ? fields.tags : [],  // 标签（P3.3）
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -1791,7 +1870,7 @@ function updateEvent(id, fields) {
       ev.endDate = fields.endDate || fields.startDate;
       ev.date = fields.startDate;
     }
-    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur']) {
+    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur', 'tags']) {
       if (fields[k] !== undefined) ev[k] = fields[k];
     }
     ev.updatedAt = new Date().toISOString();
@@ -3018,6 +3097,9 @@ function renderTool() {
 }
 
 // ---- 工具一：快速添加（默认今天、未归类，回车连续录入） ----
+// 便签「发到快速添加」预填的标题（buildQuickAdd 消费后清空；一次性传递）
+let pendingQuickAddText = '';
+
 function buildQuickAdd(panel) {
   const tk = dateKey(today());
   panel.innerHTML = `
@@ -3060,6 +3142,11 @@ function buildQuickAdd(panel) {
   };
   panel.querySelector('.qa-save').addEventListener('click', doSave);
   titleEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); });
+  // 便签联动（P3.3）：消费预填标题后清空，仅本次生效
+  if (pendingQuickAddText) {
+    titleEl.value = pendingQuickAddText;
+    pendingQuickAddText = '';
+  }
   titleEl.focus();
 }
 
@@ -3772,6 +3859,7 @@ function buildNotes(panel) {
     <div class="notes-toolbar">
       <button type="button" class="notes-btn notes-sel" disabled title="先在便签中选中文字">选区转事项</button>
       <button type="button" class="notes-btn notes-all">全部转事项</button>
+      <button type="button" class="notes-btn notes-to-qa" title="取第一行非空文字，预填到快速添加（原便签保留）">发到快速添加</button>
       <button type="button" class="notes-btn notes-list-btn">事项列表</button>
     </div>
     <div class="notes-foot">
@@ -3811,6 +3899,15 @@ function buildNotes(panel) {
     clearTimeout(notesSaveTimer);
     localStorage.setItem('quickNotes', ta.value);   // 先落盘，避免 400ms 防抖丢最新行
     notesConvertAll();
+  });
+  // 便签联动（P3.3）：第一行非空文字预填快速添加，原便签内容保留
+  panel.querySelector('.notes-to-qa').addEventListener('click', () => {
+    clearTimeout(notesSaveTimer);
+    localStorage.setItem('quickNotes', ta.value);   // 先落盘
+    const line = ta.value.split('\n').map(s => s.trim()).find(Boolean);
+    if (!line) { showToast('便签是空的，先写点什么'); return; }
+    pendingQuickAddText = line.slice(0, 60);        // 快速添加输入框上限 60 字
+    openTool('quickadd');
   });
   panel.querySelector('.notes-list-btn').addEventListener('click', () => { notesMode = 'list'; render(); });
   ta.focus();
@@ -4206,6 +4303,8 @@ function loadAppSettings() {
       voiceInputEnabled: false,    // 默认关闭语音输入
       speechProvider: 'system',   // 默认使用系统内置识别（隐私优先）
       voiceLanguage: 'zh-CN',      // 默认中文
+      hotkeyToggleEnabled: true,   // 全局快捷键：Ctrl+Alt+T 唤出/收起（默认开）
+      hotkeyQuickAddEnabled: false, // 全局快捷键：Ctrl+Alt+N 快速添加（默认关，避免打扰）
       ...saved                     // 已有设置覆盖默认
     };
   } catch { return {}; }
@@ -4262,6 +4361,20 @@ function buildSettings(panel) {
           <span class="set-desc">事项标题旁显示麦克风按钮，使用 Windows 内置识别（离线，仅本机）</span>
         </span>
         <span class="set-switch"><input type="checkbox" class="set-voice-input"><span class="set-slider"></span></span>
+      </label>
+      <label class="set-row">
+        <span class="set-text">
+          <span class="set-name">快捷键唤出侧边栏</span>
+          <span class="set-desc">Ctrl+Alt+T 唤出/收起，任何应用前台时全局生效</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-hotkey-toggle" title="Ctrl+Alt+T 唤出/收起侧边栏"><span class="set-slider"></span></span>
+      </label>
+      <label class="set-row">
+        <span class="set-text">
+          <span class="set-name">快捷键快速添加</span>
+          <span class="set-desc">Ctrl+Alt+N 直接打开快速添加并聚焦（默认关闭）</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-hotkey-qa" title="Ctrl+Alt+N 打开快速添加"><span class="set-slider"></span></span>
       </label>
     </div>
     <div class="set-group">
@@ -4344,6 +4457,41 @@ function buildSettings(panel) {
     weekList.querySelectorAll('.ev-voice-btn').forEach(btn => { btn.hidden = !voiceSwitch.checked; });
     showToast(voiceSwitch.checked ? '语音输入已开启（仅 Windows 内置识别）' : '语音输入已关闭');
   });
+
+  // 全局快捷键开关（注册失败时主进程降级并回传实际生效状态，这里据此修正 UI 与存储）
+  const hkToggle = panel.querySelector('.set-hotkey-toggle');
+  const hkQa = panel.querySelector('.set-hotkey-qa');
+  if (hkToggle && hkQa) {
+    hkToggle.checked = st.hotkeyToggleEnabled !== false;
+    hkQa.checked = st.hotkeyQuickAddEnabled === true;
+    const syncHotkeys = async () => {
+      if (!window.timetable || !window.timetable.hotkeySet) return;
+      try {
+        const res = await window.timetable.hotkeySet({ toggle: hkToggle.checked, quickadd: hkQa.checked });
+        const a = (res && res.active) || {};
+        for (const [chk, storeKey, activeKey, name] of [
+          [hkToggle, 'hotkeyToggleEnabled', 'toggle', '唤出快捷键'],
+          [hkQa, 'hotkeyQuickAddEnabled', 'quickadd', '快速添加快捷键']
+        ]) {
+          if (a[activeKey] !== undefined && a[activeKey] !== chk.checked) {
+            chk.checked = !!a[activeKey];   // 注册失败降级
+            const s = loadAppSettings(); s[storeKey] = chk.checked; saveAppSettings(s);
+            showToast(`${name}注册失败（可能被其他程序占用），已自动关闭`);
+          }
+        }
+      } catch { /* 主进程不支持时静默 */ }
+    };
+    hkToggle.addEventListener('change', () => {
+      const s = loadAppSettings(); s.hotkeyToggleEnabled = hkToggle.checked; saveAppSettings(s);
+      syncHotkeys();
+      showToast(hkToggle.checked ? '唤出快捷键已开启（Ctrl+Alt+T）' : '唤出快捷键已关闭');
+    });
+    hkQa.addEventListener('change', () => {
+      const s = loadAppSettings(); s.hotkeyQuickAddEnabled = hkQa.checked; saveAppSettings(s);
+      syncHotkeys();
+      showToast(hkQa.checked ? '快速添加快捷键已开启（Ctrl+Alt+N）' : '快速添加快捷键已关闭');
+    });
+  }
 
   // 开机自动启动（状态实时读系统，避免与注册表/登录项不一致）
   const autoSwitch = panel.querySelector('.set-autostart-input');
@@ -4866,6 +5014,20 @@ if (window.timetable) {
       sidebar.classList.toggle('side-left', cfg.side === 'left');
       sidebar.classList.toggle('mini', cfg.mode === 'mini');
     }).catch(() => { /* 主进程不可达时保持默认 */ });
+  }
+  // 全局快捷键：启动时按持久化设置同步注册（主进程已先按默认注册，这里覆盖为用户设置）
+  if (window.timetable.hotkeySet) {
+    const st = loadAppSettings();
+    window.timetable.hotkeySet({
+      toggle: st.hotkeyToggleEnabled !== false,
+      quickadd: st.hotkeyQuickAddEnabled === true
+    }).catch(() => { /* 同步失败保持主进程默认 */ });
+  }
+  // 快捷键动作：Ctrl+Alt+N → 打开快速添加
+  if (window.timetable.onShortcutAction) {
+    window.timetable.onShortcutAction((data) => {
+      if (data && data.action === 'quickadd') openTool('quickadd');
+    });
   }
 }
 

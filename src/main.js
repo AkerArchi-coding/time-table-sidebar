@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, ipcMain, dialog, clipboard, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, dialog, clipboard, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -516,6 +516,34 @@ ipcMain.handle('sync-pair-scan', () => SYNC_NOT_IMPL);
 ipcMain.handle('sync-send', () => SYNC_NOT_IMPL);
 ipcMain.handle('sync-receive-cb', () => SYNC_NOT_IMPL);
 
+// ============ 全局快捷键（P3.3）：Ctrl+Alt+T 唤出/收起，Ctrl+Alt+N 快速添加 ============
+// 注册失败（被其他程序占用）自动降级为关，返回实际生效状态；不做自由录制。
+let hotkeyState = { toggle: true, quickadd: false };   // 默认：唤出开、快速添加关
+function applyHotkeys() {
+  globalShortcut.unregisterAll();
+  if (hotkeyState.toggle) {
+    const ok = globalShortcut.register('Control+Alt+T', () => {
+      if (sidebar && !sidebar.isDestroyed()) toggleSidebarFromTray();
+    });
+    if (!ok) hotkeyState.toggle = false;   // 优雅降级
+  }
+  if (hotkeyState.quickadd) {
+    const ok = globalShortcut.register('Control+Alt+N', () => {
+      if (!sidebar || sidebar.isDestroyed()) return;
+      fullscreenHidden = false;
+      sidebar.show();
+      expandSidebar();
+      sidebar.webContents.send('shortcut-action', { action: 'quickadd' });
+    });
+    if (!ok) hotkeyState.quickadd = false;
+  }
+}
+ipcMain.handle('hotkey-set', (_e, partial) => {
+  hotkeyState = Object.assign(hotkeyState, partial || {});
+  applyHotkeys();
+  return { ok: true, active: Object.assign({}, hotkeyState) };   // 回传实际生效状态
+});
+
 // ============ 天气（主进程发起 HTTPS，绕开渲染层 CSP；免 Key 服务） ============
 function requestJson(url, timeoutMs = 7000) {
   return new Promise((resolve, reject) => {
@@ -966,6 +994,7 @@ app.whenReady().then(() => {
   setInterval(pollClipboard, 1000);
   createSidebar();
   createTray();
+  applyHotkeys();               // 全局快捷键：默认注册唤出键（渲染层加载后同步设置覆盖）
   startFullscreenCheck();
 
   // 多显示器：显示器增删/分辨率变化时重新定位侧边栏
@@ -996,6 +1025,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   app.isQuiting = true;
+  try { globalShortcut.unregisterAll(); } catch { /* 退出阶段反注册失败可忽略 */ }
 });
 
 app.on('window-all-closed', () => {
