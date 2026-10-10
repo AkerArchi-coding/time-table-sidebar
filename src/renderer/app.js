@@ -2735,6 +2735,7 @@ const TOOL_DEFS = {
   quickadd:  { title: '快速添加', pinEditing: true },
   pomodoro:  { title: '番茄钟',   pinEditing: false },
   progress:  { title: '今日进度', pinEditing: false },
+  stats:     { title: '统计',     pinEditing: false },
   notes:     { title: '快速便签', pinEditing: true },
   weather:   { title: '天气',     pinEditing: false },
   sys:       { title: '系统资源', pinEditing: false },
@@ -2768,6 +2769,7 @@ function renderTool() {
   if (currentTool === 'quickadd') buildQuickAdd(panel);
   else if (currentTool === 'pomodoro') buildPomodoro(panel);
   else if (currentTool === 'progress') buildProgress(panel);
+  else if (currentTool === 'stats') buildStatsPanel(panel);
   else if (currentTool === 'notes') buildNotes(panel);
   else if (currentTool === 'weather') buildWeather(panel);
   else if (currentTool === 'sys') buildSys(panel);
@@ -2883,6 +2885,27 @@ function appendPomoTaskLog(taskId, taskTitle, minutes) {
   const logs = loadPomoTaskLogs();
   logs.push({ taskId, taskTitle, minutes, ts: new Date().toISOString() });
   savePomoTaskLogs(logs);
+  // 同步累积跨天专注历史（统计趋势的数据源）
+  savePomoHistory(pomoHistoryUpsert(loadPomoHistory(), dateKey(today()), minutes));
+}
+
+// 番茄钟历史聚合：跨天累积，供统计趋势（key: pomoHistory，[{date, count, minutes}]，按日期升序）
+function loadPomoHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem('pomoHistory') || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function savePomoHistory(arr) {
+  localStorage.setItem('pomoHistory', JSON.stringify(arr));
+}
+// 纯函数：某日专注聚合 upsert（同日累加次数与分钟），返回新数组（不改原数组；便于单元测试）
+function pomoHistoryUpsert(history, date, minutes) {
+  const out = Array.isArray(history) ? history.slice() : [];
+  const row = out.find(r => r.date === date);
+  if (row) { row.count += 1; row.minutes += minutes; }
+  else out.push({ date, count: 1, minutes });
+  return out;
 }
 
 // 专注自然完成时同步绑定事项：pomoCount 累计 + 写入当日事项日志（pomoTick 调用；独立成函数便于单元测试）
@@ -3116,7 +3139,236 @@ function buildPomodoro(panel) {
   });
 }
 
-// ---- 工具三：今日进度 ----
+// ---- 工具三：今日进度 / 统计 ----
+// ============ 数据统计与周报（P3.1；纯函数 + DOM 柱状图，不引图表库） ============
+// ISO 时间 → 本地日期 key（toISOString 为 UTC，直接 slice 会有时区偏差，统一转本地）
+function isoDateKey(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : dateKey(d);
+}
+// 周一为一周起始
+function startOfWeek(d) {
+  const r = stripTime(d);
+  const wd = (r.getDay() + 6) % 7;   // 周一=0 … 周日=6
+  return addDays(r, -wd);
+}
+// 生成连续日期 key 数组（从 startKey 起共 days 天）
+function dateKeyRange(startKey, days) {
+  const start = parseDateKey(startKey);
+  const out = [];
+  for (let i = 0; i < days; i++) out.push(dateKey(addDays(start, i)));
+  return out;
+}
+// 区间统计：每日新增/完成/专注 + 汇总 + 分类分布 + 项目排行
+// 口径：新增按 createdAt 日期；完成按 updatedAt 日期（仅 done 项）；未来日期不计入
+function buildStats(events, history, rangeDays, now) {
+  now = now || new Date();
+  const days = Math.max(1, rangeDays | 0);
+  const keys = dateKeyRange(dateKey(addDays(stripTime(now), -(days - 1))), days);
+  const idx = new Map(keys.map((k, i) => [k, i]));
+  const daily = keys.map(k => ({ date: k, created: 0, done: 0, focusCount: 0, focusMinutes: 0 }));
+  const focusMap = new Map((history || []).map(h => [h.date, h]));
+
+  let createdTotal = 0, doneTotal = 0;
+  const catCount = {};
+  const projDone = new Map();
+  for (const ev of events || []) {
+    const ci = idx.get(isoDateKey(ev.createdAt));
+    if (ci !== undefined) { daily[ci].created++; createdTotal++; }
+    if (ev.done) {
+      const di = idx.get(isoDateKey(ev.updatedAt || ev.createdAt));
+      if (di !== undefined) {
+        daily[di].done++; doneTotal++;
+        catCount[ev.category] = (catCount[ev.category] || 0) + 1;
+        if (ev.projectId) projDone.set(ev.projectId, (projDone.get(ev.projectId) || 0) + 1);
+      }
+    }
+  }
+  let focusCount = 0, focusMinutes = 0;
+  for (const d of daily) {
+    const h = focusMap.get(d.date);
+    if (h) { d.focusCount = h.count || 0; d.focusMinutes = h.minutes || 0; }
+    focusCount += d.focusCount; focusMinutes += d.focusMinutes;
+  }
+  const categories = Object.keys(CATEGORIES).map(k => ({
+    key: k, label: CATEGORIES[k].label, color: CATEGORIES[k].color, count: catCount[k] || 0
+  }));
+  // 项目排行：只列有事项的项目，按区间完成数降序（平局按项目名），最多 5 个
+  const projects = loadProjects().map(p => {
+    const total = (events || []).filter(e => e.projectId === p.id).length;
+    return { id: p.id, name: p.name, done: projDone.get(p.id) || 0, total };
+  }).filter(p => p.total > 0).sort((a, b) => (b.done - a.done) || a.name.localeCompare(b.name)).slice(0, 5);
+
+  return {
+    startKey: keys[0], endKey: keys[keys.length - 1], daily,
+    totals: {
+      createdTotal, doneTotal,
+      rate: createdTotal ? Math.round(doneTotal / createdTotal * 100) : 0,
+      focusCount, focusMinutes
+    },
+    categories, projects
+  };
+}
+// 周报 Markdown：本周（周一~周日）完成事项按项目分组 + 专注汇总 + 每日完成条形
+function buildWeeklyReport(events, projects, history, now) {
+  now = now || new Date();
+  const ws = startOfWeek(now), we = addDays(ws, 6);
+  const wsK = dateKey(ws), weK = dateKey(we);
+  const keys = dateKeyRange(wsK, 7);
+  const inWeek = (k) => keys.includes(k);
+
+  let focusCount = 0, focusMinutes = 0;
+  for (const h of history || []) {
+    if (inWeek(h.date)) { focusCount += h.count || 0; focusMinutes += h.minutes || 0; }
+  }
+  const doneEvents = (events || []).filter(e => e.done && inWeek(isoDateKey(e.updatedAt || e.createdAt)));
+  const dayCount = keys.map(k => doneEvents.filter(e => isoDateKey(e.updatedAt || e.createdAt) === k).length);
+  const maxCount = Math.max(1, ...dayCount);
+  const WD = ['一', '二', '三', '四', '五', '六', '日'];
+  const barOf = (n) => '█'.repeat(Math.round(n / maxCount * 8)) + '░'.repeat(8 - Math.round(n / maxCount * 8));
+
+  const lines = [];
+  lines.push(`# 周报（${wsK} ~ ${weK}）`, '');
+  lines.push('## 专注概览', '');
+  lines.push(`- 完成专注：${focusCount} 个，共 ${focusMinutes} 分钟（约 ${(focusMinutes / 60).toFixed(1)} 小时）`);
+  lines.push(`- 完成事项：${doneEvents.length} 项`, '');
+  lines.push('## 每日完成', '');
+  keys.forEach((k, i) => {
+    const md = k.slice(5).replace('-', '/');
+    lines.push(`- ${md} 周${WD[i]}  ${dayCount[i]} ${barOf(dayCount[i])}`);
+  });
+  lines.push('', '## 完成事项', '');
+  if (!doneEvents.length) {
+    lines.push('本周暂无完成事项。', '');
+  } else {
+    // 按项目分组：项目按 projects 现有顺序，未归类放最后
+    const groups = [];
+    const pushGroup = (name, list) => { if (list.length) groups.push({ name, list }); };
+    for (const p of projects) {
+      pushGroup(p.name, doneEvents.filter(e => e.projectId === p.id));
+    }
+    pushGroup('未归类', doneEvents.filter(e => !e.projectId));
+    for (const g of groups) {
+      lines.push(`### ${g.name}（${g.list.length}）`, '');
+      for (const ev of g.list) lines.push(`- [x] ${ev.time ? ev.time + ' ' : ''}${ev.title}`);
+      lines.push('');
+    }
+  }
+  lines.push('> 由日程侧边栏自动生成');
+  return lines.join('\n');
+}
+
+// ---- 统计工具面板 ----
+let statsRangeDays = 7;   // 统计区间：7 | 30
+function buildStatsPanel(panel) {
+  const now = today();
+  const st = buildStats(loadEvents(), loadPomoHistory(), statsRangeDays, now);
+  const t = st.totals;
+  const maxMin = Math.max(1, ...st.daily.map(d => d.focusMinutes));
+  const maxCat = Math.max(1, ...st.categories.map(c => c.count));
+  const WD_CH = ['日', '一', '二', '三', '四', '五', '六'];
+  const barCols = st.daily.map(d => {
+    const h = Math.round(d.focusMinutes / maxMin * 100);
+    const wd = statsRangeDays === 7 ? '<em>' + WD_CH[parseDateKey(d.date).getDay()] + '</em>' : '';
+    return `<div class="stat-bar-col" title="${d.date}：专注 ${d.focusCount} 次/${d.focusMinutes} 分钟，完成 ${d.done} 项">
+      <div class="stat-bar-track"><div class="stat-bar" style="height:${h}%"></div></div>
+      <div class="stat-bar-x">${d.date.slice(8)}${wd}</div>
+    </div>`;
+  }).join('');
+  const wsK = dateKey(startOfWeek(now)), weK = dateKey(addDays(startOfWeek(now), 6));
+
+  panel.innerHTML = `
+    <div class="stat-toolbar">
+      <div class="stat-range">
+        <button type="button" class="stat-range-btn" data-r="7">近7天</button>
+        <button type="button" class="stat-range-btn" data-r="30">近30天</button>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">专注趋势<span class="stat-card-sub">分钟/日</span></div>
+      <div class="stat-bars">${barCols}</div>
+      <div class="stat-card-foot">共 ${t.focusCount} 次专注 · ${t.focusMinutes} 分钟</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">事项概览<span class="stat-card-sub">${st.startKey} ~ ${st.endKey}</span></div>
+      <div class="stat-overview">
+        <div class="stat-num"><b>${t.doneTotal}</b><span>已完成</span></div>
+        <div class="stat-num"><b>${t.createdTotal}</b><span>新增</span></div>
+        <div class="stat-num"><b>${t.rate}%</b><span>完成率</span></div>
+      </div>
+      ${progressBarHtml(Math.min(t.doneTotal, t.createdTotal), t.createdTotal)}
+      <div class="stat-card-hint">完成率＝区间完成数/新增数；补做历史事项时可超过 100%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">分类分布<span class="stat-card-sub">按完成数</span></div>
+      <div class="stat-rows">
+        ${st.categories.map(c => `
+          <div class="stat-row">
+            <span class="stat-row-name">${c.label}</span>
+            <span class="stat-row-bar"><i style="width:${Math.round(c.count / maxCat * 100)}%;background:${c.color}"></i></span>
+            <span class="stat-row-num">${c.count}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">项目排行<span class="stat-card-sub">区间完成/总事项</span></div>
+      <div class="stat-rows">
+        ${st.projects.length ? st.projects.map(p => `
+          <div class="stat-row">
+            <span class="stat-row-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
+            <span class="stat-row-bar"><i style="width:${p.total ? Math.round(p.done / p.total * 100) : 0}%"></i></span>
+            <span class="stat-row-num">${p.done}/${p.total}</span>
+          </div>`).join('') : '<div class="empty-hint">— 暂无项目事项 —</div>'}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">本周周报<span class="stat-card-sub">${wsK} ~ ${weK}</span></div>
+      <div class="stat-card-hint">汇总本周完成事项与专注时长，Markdown 纯文本，可粘贴到便签/文档</div>
+      <div class="stat-week-actions">
+        <button type="button" class="notes-btn stat-copy-week">复制周报</button>
+        <button type="button" class="notes-btn stat-export-week">导出 .md</button>
+      </div>
+    </div>
+  `;
+
+  // 区间切换：重绘本面板
+  panel.querySelectorAll('.stat-range-btn').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.r) === statsRangeDays);
+    btn.addEventListener('click', () => {
+      statsRangeDays = Number(btn.dataset.r);
+      panel.innerHTML = '';
+      buildStatsPanel(panel);
+    });
+  });
+
+  const getReport = () => buildWeeklyReport(loadEvents(), loadProjects(), loadPomoHistory(), now);
+  panel.querySelector('.stat-copy-week').addEventListener('click', () => {
+    const text = getReport();
+    if (window.timetable && window.timetable.clipboardCopy) {
+      window.timetable.clipboardCopy(text);
+      showToast('周报已复制到剪贴板');
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => showToast('周报已复制到剪贴板'));
+    } else {
+      showToast('当前环境不支持复制剪贴板');
+    }
+  });
+  panel.querySelector('.stat-export-week').addEventListener('click', async () => {
+    const btn = panel.querySelector('.stat-export-week');
+    btn.disabled = true;
+    try {
+      const res = await window.timetable.backupExportDialog(`周报-${wsK}.md`, getReport());
+      if (res && res.ok) showToast('周报已导出');
+      else if (res && res.error) showToast('导出失败：' + res.error);
+    } catch (e) {
+      showToast('导出失败：' + (e && e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function buildProgress(panel) {
   const tk = dateKey(today());
   const todays = loadEvents().filter(e => eventSpansDate(e, tk));
