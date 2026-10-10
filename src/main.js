@@ -140,15 +140,32 @@ function loadUiConfig() {
     const o = JSON.parse(fs.readFileSync(uiConfigPath(), 'utf8'));
     if (o.side === 'left' || o.side === 'right') uiConfig.side = o.side;
     if (o.mode === 'rail' || o.mode === 'mini' || o.mode === 'hidden') uiConfig.mode = o.mode;
+    if (typeof o.displayId === 'number') uiConfig.displayId = o.displayId;
   } catch { /* 首次运行或文件损坏 → 保持默认 */ }
 }
 function saveUiConfig() {
   try { fs.writeFileSync(uiConfigPath(), JSON.stringify(uiConfig), 'utf8'); } catch { /* 写盘失败下次再试 */ }
 }
 
+// 多显示器：选择目标显示器
+// 优先级：已保存的 displayId（若仍存在）→ 光标所在显示器 → 主屏
+function getTargetDisplay() {
+  const all = screen.getAllDisplays();
+  if (typeof uiConfig.displayId === 'number') {
+    const found = all.find(d => d.id === uiConfig.displayId);
+    if (found) return found;
+  }
+  try {
+    const pt = screen.getCursorScreenPoint();
+    return screen.getDisplayNearestPoint(pt) || screen.getPrimaryDisplay();
+  } catch {
+    return screen.getPrimaryDisplay();
+  }
+}
+
 // 收起态几何：rail = 全高窄条；mini = 半高窄条（垂直居中，Dock 感）
 function collapsedRect() {
-  const wa = screen.getPrimaryDisplay().workArea;
+  const wa = getTargetDisplay().workArea;
   const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - NARROW_W;
   if (uiConfig.mode === 'mini') {
     const h = Math.floor(wa.height / 2);
@@ -158,7 +175,7 @@ function collapsedRect() {
 }
 // 展开态几何：全高面板，贴靠当前停靠侧
 function expandedRect() {
-  const wa = screen.getPrimaryDisplay().workArea;
+  const wa = getTargetDisplay().workArea;
   const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - EXPANDED_W;
   return { x, y: wa.y, width: EXPANDED_W, height: wa.height };
 }
@@ -311,6 +328,12 @@ function checkCursor() {
           edgeDwellTimer = null;
           const p = screen.getCursorScreenPoint();
           if (!expanded && pointNearEdge(p)) {
+            // 多显示器：跟随触发边缘所在的显示器，记录并持久化
+            const d = screen.getDisplayNearestPoint(p);
+            if (d && d.id !== uiConfig.displayId) {
+              uiConfig.displayId = d.id;
+              saveUiConfig();
+            }
             if (!sidebar.isVisible()) sidebar.showInactive();
             expandSidebar();
           }
@@ -389,6 +412,100 @@ ipcMain.handle('project-import', async (e) => {
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
+});
+
+// ============ 备份与数据目录 ============
+// 读取主进程侧的 JSON 数据文件（sidebar-ui / clipboard-history），纳入完整备份
+ipcMain.handle('backup-get-main-files', () => {
+  const result = {};
+  const files = { sidebarUi: 'sidebar-ui.json', clipboardHistory: 'clipboard-history.json' };
+  for (const [key, fname] of Object.entries(files)) {
+    try {
+      result[key] = fs.readFileSync(path.join(app.getPath('userData'), fname), 'utf8');
+    } catch { result[key] = null; }
+  }
+  return result;
+});
+// 写回主进程侧 JSON 数据文件（完整备份恢复时调用）
+ipcMain.handle('backup-set-main-files', (_e, payload) => {
+  if (!payload || typeof payload !== 'object') return { ok: false, error: 'invalid' };
+  const files = { sidebarUi: 'sidebar-ui.json', clipboardHistory: 'clipboard-history.json' };
+  for (const [key, fname] of Object.entries(files)) {
+    if (typeof payload[key] === 'string') {
+      try { fs.writeFileSync(path.join(app.getPath('userData'), fname), payload[key], 'utf8'); }
+      catch { /* 单文件失败不阻塞其余 */ }
+    }
+  }
+  return { ok: true };
+});
+// 备份文件保存对话框（.ttbk = Timetable Backup）
+ipcMain.handle('backup-export-dialog', async (e, { defaultName, content }) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: '导出备份',
+    defaultPath: defaultName || 'timetable-backup.ttbk',
+    filters: [{ name: '日程备份文件', extensions: ['ttbk'] }]
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  try {
+    await fs.promises.writeFile(filePath, content, 'utf8');
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+// 备份文件打开对话框
+ipcMain.handle('backup-import-dialog', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '导入备份',
+    filters: [{ name: '日程备份文件', extensions: ['ttbk'] }],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths || !filePaths[0]) return { ok: false, canceled: true };
+  try {
+    const content = await fs.promises.readFile(filePaths[0], 'utf8');
+    return { ok: true, path: filePaths[0], content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// 查询 / 设置数据目录（userData）
+ipcMain.handle('data-dir-get', () => ({
+  current: app.getPath('userData'),
+  default: app.getPath('userData')   // 默认值由 Electron 决定，迁移后 current 会改变
+}));
+// 选择新数据目录：渲染层需先传入完整备份（localStorage 数据在渲染层），
+// 主进程将备份写入迁移标记，重启后 setPath 到新目录并恢复备份。
+ipcMain.handle('data-dir-migrate', async (e, backup) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '选择新的数据保存目录',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (canceled || !filePaths || !filePaths[0]) return { ok: false, canceled: true };
+  const newDir = filePaths[0];
+  // 校验目录可写
+  const probe = path.join(newDir, '.timetable-write-test');
+  try {
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+  } catch (err) {
+    return { ok: false, error: '目标目录不可写：' + String((err && err.message) || err) };
+  }
+  // 写迁移标记（含备份数据）到当前 userData
+  try {
+    const markerDir = app.getPath('userData');
+    fs.writeFileSync(
+      path.join(markerDir, 'data-dir-marker.json'),
+      JSON.stringify({ target: newDir, backup: backup || null }),
+      'utf8'
+    );
+  } catch (err) {
+    return { ok: false, error: '无法写入迁移标记：' + String((err && err.message) || err) };
+  }
+  return { ok: true, newDir, needRestart: true };
 });
 
 // ============ 天气（主进程发起 HTTPS，绕开渲染层 CSP；免 Key 服务） ============
@@ -603,6 +720,7 @@ ipcMain.on('clipboard-enabled', (_e, on) => {
 });
 
 // ============ 开机自动启动（Windows: Run 注册表 / macOS: 登录项；UI 与平台解耦） ============
+ipcMain.handle('app-version', () => app.getVersion());
 ipcMain.handle('autostart-get', () => {
   try { return app.getLoginItemSettings().openAtLogin; } catch { return false; }
 });
@@ -814,7 +932,24 @@ function collapseSidebar(silent) {
 }
 
 // ============ App 生命周期 ============
+// 数据目录迁移标记：启动时若存在则 setPath 到目标目录，并把备份数据发给渲染层恢复
+let pendingMigrateBackup = null;
+function processDataDirMarker() {
+  const defaultData = app.getPath('userData');
+  const markerPath = path.join(defaultData, 'data-dir-marker.json');
+  if (!fs.existsSync(markerPath)) return;
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    if (marker && typeof marker.target === 'string' && fs.existsSync(marker.target)) {
+      app.setPath('userData', marker.target);
+      pendingMigrateBackup = marker.backup || null;
+      fs.unlinkSync(markerPath);   // 消费掉标记，避免重复迁移
+    }
+  } catch { /* 标记损坏则忽略，保持默认目录 */ }
+}
+
 app.whenReady().then(() => {
+  processDataDirMarker();      // 必须在所有读取 userData 的操作之前
   electronPid = process.pid;
   // macOS：这是贴边小部件而非普通应用，不占用 Dock 图标（对应 Windows 的 skipTaskbar）
   if (process.platform === 'darwin' && app.dock) app.dock.hide();
@@ -824,6 +959,27 @@ app.whenReady().then(() => {
   createSidebar();
   createTray();
   startFullscreenCheck();
+
+  // 多显示器：显示器增删/分辨率变化时重新定位侧边栏
+  screen.on('display-added', () => { applyUiConfig(); });
+  screen.on('display-metrics-changed', () => { applyUiConfig(); });
+  screen.on('display-removed', () => {
+    const ids = new Set(screen.getAllDisplays().map(d => d.id));
+    if (typeof uiConfig.displayId === 'number' && !ids.has(uiConfig.displayId)) {
+      // 当前显示器已断开，回退到主屏
+      uiConfig.displayId = screen.getPrimaryDisplay().id;
+      saveUiConfig();
+    }
+    applyUiConfig();
+  });
+
+  // 数据目录迁移后：把备份数据发给渲染层恢复 localStorage
+  if (pendingMigrateBackup && sidebar && !sidebar.isDestroyed()) {
+    sidebar.webContents.once('did-finish-load', () => {
+      sidebar.webContents.send('data-migrate-restore', pendingMigrateBackup);
+      pendingMigrateBackup = null;
+    });
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createSidebar();

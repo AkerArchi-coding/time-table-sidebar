@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('timetable', {
     return () => ipcRenderer.removeListener('clipboard-update', handler);
   },
   // 开机自动启动：查询 / 设置（平台细节在主进程，UI 与实现解耦）
+  appVersion: () => ipcRenderer.invoke('app-version'),
   autostartGet: () => ipcRenderer.invoke('autostart-get'),
   autostartSet: (on) => ipcRenderer.send('autostart-set', on),
   // 托盘动作：主进程 → 渲染层（如托盘菜单"设置"）
@@ -61,7 +62,20 @@ contextBridge.exposeInMainWorld('timetable', {
   // 侧边栏 UI 配置：停靠侧 / 显示模式（主进程持有并持久化）
   uiConfigGet: () => ipcRenderer.invoke('ui-config-get'),
   uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial),
-  // 语音输入（预留接口：当前主进程为占位实现，返回 not_implemented；未来接入 VoiceService）
+  // 备份：导出/导入对话框 + 主进程数据文件存取
+  backupGetMainFiles: () => ipcRenderer.invoke('backup-get-main-files'),
+  backupSetMainFiles: (payload) => ipcRenderer.invoke('backup-set-main-files', payload),
+  backupExportDialog: (defaultName, content) => ipcRenderer.invoke('backup-export-dialog', { defaultName, content }),
+  backupImportDialog: () => ipcRenderer.invoke('backup-import-dialog'),
+  // 数据目录：查询当前路径 / 迁移到新目录（需重启）
+  dataDirGet: () => ipcRenderer.invoke('data-dir-get'),
+  dataDirMigrate: (backup) => ipcRenderer.invoke('data-dir-migrate', backup),
+  onDataMigrateRestore: (cb) => {
+    const handler = (_e, backup) => cb(backup);
+    ipcRenderer.on('data-migrate-restore', handler);
+    return () => ipcRenderer.removeListener('data-migrate-restore', handler);
+  },
+  // 语音输入（Windows SAPI 5 本机识别；非 Windows 平台返回 platform_unsupported）
   voiceGetStatus: () => ipcRenderer.invoke('voice-status'),
   voiceStart: (options) => ipcRenderer.send('voice-start', options || {}),
   voiceStop: () => ipcRenderer.send('voice-stop'),

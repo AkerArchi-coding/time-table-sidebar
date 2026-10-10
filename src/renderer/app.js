@@ -3508,7 +3508,45 @@ function buildSettings(panel) {
         <span class="set-switch"><input type="checkbox" class="set-voice-input"><span class="set-slider"></span></span>
       </label>
     </div>
-    <div class="set-about">日程侧边栏 v0.1.0<br>所有数据仅保存在本机</div>
+    <div class="set-group">
+      <div class="set-group-title">数据与备份</div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">数据目录</span>
+          <span class="set-desc" id="dataDirPath">读取中…</span>
+        </span>
+        <button type="button" class="set-btn" id="dataDirMigrateBtn">迁移…</button>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">导出设置</span>
+          <span class="set-desc">偏好、番茄钟、排序等设备本地设置</span>
+        </span>
+        <button type="button" class="set-btn" data-backup="settings">导出</button>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">导出业务数据</span>
+          <span class="set-desc">项目、事项、便签等（不含本机偏好）</span>
+        </span>
+        <button type="button" class="set-btn" data-backup="business">导出</button>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">完整备份</span>
+          <span class="set-desc">业务数据 + 设置 + 剪贴板/UI 配置</span>
+        </span>
+        <button type="button" class="set-btn" data-backup="full">备份</button>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">导入备份</span>
+          <span class="set-desc">从 .ttbk 文件恢复（有冲突检测）</span>
+        </span>
+        <button type="button" class="set-btn" id="backupImportBtn">导入</button>
+      </div>
+    </div>
+    <div class="set-about" id="setAbout">日程侧边栏<br>所有数据仅保存在本机</div>
   `;
 
   // 剪贴板历史开关（关 = 暂停记录，不清空已有历史）
@@ -3573,6 +3611,141 @@ function buildSettings(panel) {
     const labels = { rail: '常驻窄条', mini: '迷你 Dock', hidden: '完全隐藏' };
     showToast('显示模式：' + (labels[modeSel.value] || modeSel.value));
   });
+
+  // 应用版本号（主进程读取 package.json）
+  const aboutEl = panel.querySelector('#setAbout');
+  if (aboutEl && window.timetable && window.timetable.appVersion) {
+    window.timetable.appVersion().then(v => {
+      if (v) aboutEl.innerHTML = `日程侧边栏 v${escapeHtml(v)}<br>所有数据仅保存在本机`;
+    }).catch(() => { /* 版本读取失败时保持纯文本 */ });
+  }
+
+  // ---- 数据目录：显示当前路径 + 迁移 ----
+  const dataDirPathEl = panel.querySelector('#dataDirPath');
+  const dataDirMigrateBtn = panel.querySelector('#dataDirMigrateBtn');
+  if (window.timetable && window.timetable.dataDirGet) {
+    window.timetable.dataDirGet().then(d => {
+      if (dataDirPathEl && d && d.current) dataDirPathEl.textContent = d.current;
+    }).catch(() => { if (dataDirPathEl) dataDirPathEl.textContent = '读取失败'; });
+  }
+  if (dataDirMigrateBtn && window.timetable && window.timetable.dataDirMigrate) {
+    dataDirMigrateBtn.addEventListener('click', async () => {
+      if (!confirm('迁移数据目录会将所有数据复制到新位置，完成后需要重启应用。是否继续？')) return;
+      dataDirMigrateBtn.disabled = true;
+      dataDirMigrateBtn.textContent = '打包中…';
+      try {
+        const backup = window.Backup.buildLocalStorageBackup();
+        const res = await window.timetable.dataDirMigrate(backup);
+        if (res && res.ok) {
+          showToast('数据目录已切换，重启后生效');
+          setTimeout(() => {
+            if (confirm('数据目录迁移完成，是否立即重启应用？')) {
+              window.location.reload();
+            }
+          }, 600);
+        } else if (res && res.error) {
+          showToast('迁移失败：' + res.error);
+        } else if (res && res.canceled) {
+          /* 用户取消 */
+        }
+      } catch (e) {
+        showToast('迁移失败：' + (e && e.message || e));
+      } finally {
+        dataDirMigrateBtn.disabled = false;
+        dataDirMigrateBtn.textContent = '迁移…';
+      }
+    });
+  }
+
+  // ---- 备份导出（settings / business / full） ----
+  const backupBtns = panel.querySelectorAll('[data-backup]');
+  backupBtns.forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const type = btn.dataset.backup;
+      const oldText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '打包…';
+      try {
+        let mainFiles = null;
+        if (type === 'full' && window.timetable && window.timetable.backupGetMainFiles) {
+          mainFiles = await window.timetable.backupGetMainFiles();
+        }
+        let appVer = 'unknown';
+        if (window.timetable && window.timetable.appVersion) {
+          try { appVer = await window.timetable.appVersion() || 'unknown'; } catch {}
+        }
+        const data = window.Backup.buildBackup(type, mainFiles, appVer);
+        const content = JSON.stringify(data, null, 2);
+        const stamp = new Date().toISOString().slice(0, 10);
+        const name = `timetable-${type}-${stamp}.ttbk`;
+        const res = await window.timetable.backupExportDialog(name, content);
+        if (res && res.ok) {
+          showToast('已导出到：' + res.path.split(/[\\/]/).slice(-1)[0]);
+        } else if (res && res.error) {
+          showToast('导出失败：' + res.error);
+        }
+      } catch (e) {
+        showToast('导出失败：' + (e && e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+      }
+    });
+  });
+
+  // ---- 备份导入（含冲突检测） ----
+  const backupImportBtn = panel.querySelector('#backupImportBtn');
+  if (backupImportBtn && window.timetable && window.timetable.backupImportDialog) {
+    backupImportBtn.addEventListener('click', async () => {
+      const oldText = backupImportBtn.textContent;
+      backupImportBtn.disabled = true;
+      backupImportBtn.textContent = '读取中…';
+      try {
+        const res = await window.timetable.backupImportDialog();
+        if (!res || !res.ok) {
+          if (res && res.error) showToast('读取失败：' + res.error);
+          return;
+        }
+        let data;
+        try { data = JSON.parse(res.content); }
+        catch { showToast('备份文件格式损坏（JSON 解析失败）'); return; }
+        const v = window.Backup.validateBackup(data);
+        if (!v.ok) { showToast(v.error); return; }
+
+        if (data.type === 'full') {
+          if (!confirm('完整备份将覆盖当前所有数据（项目、事项、设置等），此操作不可撤销。是否继续？')) return;
+          window.Backup.applyFullReplace(data);
+          if (data.mainFiles && window.timetable && window.timetable.backupSetMainFiles) {
+            await window.timetable.backupSetMainFiles(data.mainFiles);
+          }
+          showToast('完整备份已恢复，正在刷新…');
+          setTimeout(() => { render(); window.location.reload(); }, 400);
+          return;
+        }
+
+        // settings / business：冲突检测
+        const plan = window.Backup.planImportConflicts(data);
+        let projectMode = 'overwrite', eventMode = 'overwrite';
+        const pj = plan.projects, ev = plan.events;
+        if (pj && pj.conflicts) {
+          const a = confirm(`项目有 ${pj.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。\n（如需跳过冲突项请在导入前手动处理）`);
+          projectMode = a ? 'overwrite' : 'keep';
+        }
+        if (ev && ev.conflicts) {
+          const a = confirm(`事项有 ${ev.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。`);
+          eventMode = a ? 'overwrite' : 'keep';
+        }
+        const ret = window.Backup.applyImport(data, { projectMode, eventMode });
+        showToast('导入完成：' + (ret.logs.length ? ret.logs[0] : '无变化'));
+        render();
+      } catch (e) {
+        showToast('导入失败：' + (e && e.message || e));
+      } finally {
+        backupImportBtn.disabled = false;
+        backupImportBtn.textContent = oldText;
+      }
+    });
+  }
 }
 
 // ============ 右键上下文菜单 ============
@@ -3904,6 +4077,20 @@ if (window.timetable) {
   window.timetable.onTrayAction((d) => {
     if (d && d.action === 'settings') openTool('settings');
   });
+  // 数据目录迁移后：主进程把备份数据发回渲染层恢复 localStorage
+  if (window.timetable.onDataMigrateRestore) {
+    window.timetable.onDataMigrateRestore((backup) => {
+      try {
+        if (window.Backup && backup) {
+          window.Backup.restoreLocalStorageBackup(backup);
+          showToast('数据目录迁移完成，数据已恢复');
+          render();
+        }
+      } catch (e) {
+        showToast('数据恢复失败：' + (e && e.message || e));
+      }
+    });
+  }
 }
 
 // 窗口可见性：隐藏进托盘时暂停非必要刷新（60s 全量重绘 / 系统采样 / 天气），重新显示时立即补刷。
