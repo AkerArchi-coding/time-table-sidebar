@@ -75,15 +75,34 @@ contextBridge.exposeInMainWorld('timetable', {
     ipcRenderer.on('data-migrate-restore', handler);
     return () => ipcRenderer.removeListener('data-migrate-restore', handler);
   },
-  // 扫码配对 / 局域网同步（预留接口，主进程返回 not_implemented）
+  // 局域网同步（P3.4）：配对 + 快照交换（secret 由主进程保管，不进 localStorage/备份）
+  // 设备上报：渲染层启动时把 deviceId 发给主进程（配对/同步握手用）
+  syncHello: (deviceId) => ipcRenderer.send('sync-hello', deviceId),
+  // A 侧「等待配对」：返回 { ok, port, code, ips, expiresAt }；配对成功经 onSyncPaired 推送
   syncPairStart: () => ipcRenderer.invoke('sync-pair-start'),
-  syncPairScan: () => ipcRenderer.invoke('sync-pair-scan'),
-  syncSend: (payload) => ipcRenderer.invoke('sync-send', payload),
-  onSyncReceive: (cb) => {
-    const handler = (_e, data) => cb(data);
-    ipcRenderer.on('sync-receive', handler);
-    return () => ipcRenderer.removeListener('sync-receive', handler);
+  syncPairStop: () => ipcRenderer.invoke('sync-pair-stop'),
+  onSyncPaired: (cb) => {
+    const handler = (_e, info) => cb(info);
+    ipcRenderer.on('sync-paired', handler);
+    return () => ipcRenderer.removeListener('sync-paired', handler);
   },
+  // B 侧：UDP 发现等待中的设备 → [{device, ip, port}]
+  syncPairScan: () => ipcRenderer.invoke('sync-pair-scan'),
+  // B 侧：输入配对码握手 → { ok, peerDevice } | { ok:false, error }
+  syncPairConnect: (ip, port, code) => ipcRenderer.invoke('sync-pair-connect', { ip, port, code }),
+  // 同步服务：被对端连接时渲染层会收到 onSyncExchangeRequest，处理后调 syncExchangeRespond 回包
+  syncListen: () => ipcRenderer.invoke('sync-listen'),
+  syncExchangeRespond: (snapshot) => ipcRenderer.send('sync-exchange-respond', snapshot || {}),
+  onSyncExchangeRequest: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('sync-exchange-request', handler);
+    return () => ipcRenderer.removeListener('sync-exchange-request', handler);
+  },
+  // 发起同步：{ ip, port, peerDeviceId, snapshot } → { ok, data: 对端快照 } | { ok:false, error }
+  syncSend: (payload) => ipcRenderer.invoke('sync-send', payload || {}),
+  // 解绑设备（主进程删 secret；渲染层自行删设备记录）
+  syncUnpair: (deviceId) => ipcRenderer.invoke('sync-unpair', deviceId),
+  syncServerStatus: () => ipcRenderer.invoke('sync-server-status'),
   // 全局快捷键：设置开关（主进程注册/反注册，注册失败返回降级后的实际生效状态）
   hotkeySet: (partial) => ipcRenderer.invoke('hotkey-set', partial || {}),
   // 快捷键动作：主进程 → 渲染层（如 Ctrl+Alt+N 打开快速添加）

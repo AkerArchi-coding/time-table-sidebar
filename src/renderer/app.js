@@ -1713,6 +1713,8 @@ function batchDeleteEvents(ids) {
     if (ev && ev.projectId) pids.add(ev.projectId);
   }
   saveEvents(all.filter(e => !ids.includes(e.id)));
+  // 同步墓碑（P3.4）：批量删除同样写墓碑，保证删除传播
+  for (const id of ids) addTombstone(id, 'event');
   pids.forEach(p => bumpProjectRevision(p));
   render();
 }
@@ -1887,6 +1889,7 @@ function deleteEvent(id) {
   const all = loadEvents();
   const ev = all.find(e => e.id === id);
   saveEvents(all.filter(e => e.id !== id));
+  addTombstone(id, 'event');   // 同步墓碑（P3.4）：删除传播
   if (ev && ev.projectId) bumpProjectRevision(ev.projectId);
   render();
 }
@@ -2005,6 +2008,7 @@ function updateProject(id, fields) {
 
 function deleteProject(id) {
   saveProjects(loadProjects().filter(p => p.id !== id));
+  addTombstone(id, 'project');   // 同步墓碑（P3.4）：删除传播
   // 项目下事项 → 未归类
   const all = loadEvents();
   let changed = false;
@@ -2052,6 +2056,130 @@ function loadSyncPairs() {
 }
 function saveSyncPairs(pairs) {
   localStorage.setItem('syncPairs', JSON.stringify(pairs));
+}
+
+// ---- 同步墓碑（P3.4）：删除传播用，localStorage: syncTombstones，上限 500 条滚动 ----
+// 结构：[{ id, kind:'event'|'project', deletedAt, deviceId }]
+const TOMBSTONE_MAX = 500;
+function loadTombstones() {
+  try {
+    const list = JSON.parse(localStorage.getItem('syncTombstones') || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+function saveTombstones(list) {
+  // 滚动截断：超出上限只留最新（deletedAt 大的在前）
+  const sorted = (Array.isArray(list) ? list : []).slice().sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''));
+  localStorage.setItem('syncTombstones', JSON.stringify(sorted.slice(0, TOMBSTONE_MAX)));
+}
+function addTombstone(id, kind) {
+  const list = loadTombstones();
+  // 幂等：同 id+kind 只保留最新一条
+  const rest = list.filter(t => !(t.id === id && t.kind === kind));
+  rest.push({ id, kind, deletedAt: new Date().toISOString(), deviceId: getDeviceId() });
+  saveTombstones(rest);
+}
+
+// ---- 同步快照组装/合并（P3.4） ----
+// 快照 = { deviceId, at, projects, events, tombstones, pomoHistory }（整条记录传输，recur/tags 随记录走）
+function buildSyncSnapshot() {
+  return {
+    deviceId: getDeviceId(),
+    at: new Date().toISOString(),
+    projects: loadProjects(),
+    events: loadEvents(),
+    tombstones: loadTombstones(),
+    pomoHistory: (() => { try { return JSON.parse(localStorage.getItem('pomoHistory') || '[]'); } catch { return []; } })()
+  };
+}
+
+// LWW 决胜：updatedAt 新者胜；完全相同按 deviceId 字典序兜底（确定性不抖动）
+// 返回 true = a 胜（采用 a）
+function lwwWin(aUpd, aDev, bUpd, bDev) {
+  const au = aUpd || '', bu = bUpd || '';
+  if (au !== bu) return au > bu;
+  return String(aDev || '') >= String(bDev || '');
+}
+
+// 合并本地与对端快照（纯函数，不写存储；返回合并后的数据与统计）
+// local/remote 形态同 buildSyncSnapshot；墓碑：删除时间晚于记录 updatedAt → 删除
+function mergeSyncData(local, remote) {
+  const stats = { projects: { added: 0, updated: 0, deleted: 0 }, events: { added: 0, updated: 0, deleted: 0 } };
+  const myDev = (local && local.deviceId) || '';
+  const peerDev = (remote && remote.deviceId) || '';
+
+  // 墓碑合并（去重：同 id+kind 保留 deletedAt 最新）
+  const tombMap = new Map();
+  for (const t of [...(local.tombstones || []), ...(remote.tombstones || [])]) {
+    if (!t || !t.id || !t.kind) continue;
+    const k = t.kind + '|' + t.id;
+    const old = tombMap.get(k);
+    if (!old || (t.deletedAt || '') > (old.deletedAt || '')) tombMap.set(k, t);
+  }
+  const tombs = Array.from(tombMap.values());
+  const tombOf = (kind, id) => tombMap.get(kind + '|' + id);
+
+  // 项目/事项共用合并器
+  const mergeList = (localList, remoteList, kind) => {
+    const out = new Map();   // id → 记录
+    const st = kind === 'project' ? stats.projects : stats.events;
+    // 先放本地
+    for (const r of localList || []) {
+      const t = tombOf(kind, r.id);
+      if (t && (t.deletedAt || '') > (r.updatedAt || '')) { st.deleted++; continue; }   // 本侧墓碑删本地
+      out.set(r.id, r);
+    }
+    // 再合对端
+    for (const r of remoteList || []) {
+      const t = tombOf(kind, r.id);
+      if (t && (t.deletedAt || '') > (r.updatedAt || '')) {
+        // 对端记录被墓碑删除：若本地有则一并删
+        if (out.delete(r.id)) st.deleted++;
+        continue;
+      }
+      const cur = out.get(r.id);
+      if (!cur) { out.set(r.id, r); st.added++; continue; }
+      // 双方都有 → LWW（updatedAt 完全相同按 deviceId 兜底）
+      if (lwwWin(r.updatedAt, peerDev, cur.updatedAt, myDev)) {
+        out.set(r.id, r);
+        st.updated++;
+      }
+    }
+    return Array.from(out.values());
+  };
+
+  const projects = mergeList(local.projects, remote.projects, 'project');
+  const events = mergeList(local.events, remote.events, 'event');
+
+  // 番茄钟历史：按 date 合并取 count/minutes 较大值（同一日双端各自累计，取大避免回退）
+  const pomoMap = new Map();
+  for (const h of [...(local.pomoHistory || []), ...(remote.pomoHistory || [])]) {
+    if (!h || !h.date) continue;
+    const cur = pomoMap.get(h.date);
+    if (!cur) { pomoMap.set(h.date, { date: h.date, count: h.count || 0, minutes: h.minutes || 0 }); }
+    else {
+      cur.count = Math.max(cur.count, h.count || 0);
+      cur.minutes = Math.max(cur.minutes, h.minutes || 0);
+    }
+  }
+  const pomoHistory = Array.from(pomoMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+  return { projects, events, tombstones: tombs, pomoHistory, stats };
+}
+
+// 把合并结果应用到本地存储 + render（syncAt 写入每条记录的 lastSyncAt 便于追溯）
+function applyMergedData(merged, peerName) {
+  const syncAt = new Date().toISOString();
+  for (const p of merged.projects) p.lastSyncAt = syncAt;
+  for (const ev of merged.events) ev.lastSyncAt = syncAt;
+  saveProjects(merged.projects);
+  saveEvents(merged.events);
+  saveTombstones(merged.tombstones);
+  localStorage.setItem('pomoHistory', JSON.stringify(merged.pomoHistory));
+  addSyncLog('lan-sync', {
+    detail: `与「${peerName || '对端设备'}」同步完成：项目 +${merged.stats.projects.added}/~${merged.stats.projects.updated}/-${merged.stats.projects.deleted}，事项 +${merged.stats.events.added}/~${merged.stats.events.updated}/-${merged.stats.events.deleted}`
+  });
+  render();
 }
 
 // ---- 同步操作日志（localStorage: syncLog，最新在前，上限 200 条） ----
@@ -3057,6 +3185,7 @@ const TOOL_DEFS = {
   weather:   { title: '天气',     pinEditing: false },
   sys:       { title: '系统资源', pinEditing: false },
   clipboard: { title: '剪贴板',   pinEditing: false },
+  sync:      { title: '设备同步', pinEditing: false },
   settings:  { title: '设置',     pinEditing: false }
 };
 
@@ -3092,6 +3221,7 @@ function renderTool() {
   else if (currentTool === 'weather') buildWeather(panel);
   else if (currentTool === 'sys') buildSys(panel);
   else if (currentTool === 'clipboard') buildClipboard(panel);
+  else if (currentTool === 'sync') buildSyncTool(panel);
   else if (currentTool === 'settings') buildSettings(panel);
   weekList.appendChild(panel);
 }
@@ -4313,6 +4443,293 @@ function saveAppSettings(s) {
   localStorage.setItem('appSettings', JSON.stringify(s));
 }
 
+// ---- 工具：设备同步（P3.4 局域网同步） ----
+// 面板状态（工具页内会话级；关闭工具页即放弃进行中的配对等待）
+let syncToolState = { pairing: null, scanning: false, found: [] };
+
+function buildSyncTool(panel) {
+  const pairs = loadSyncPairs();
+  const myId = getDeviceId();
+  // 打开本页即开启同步服务监听（对端可发现并连接；空闲 5 分钟主进程自动关停）
+  if (window.timetable && window.timetable.syncListen) {
+    window.timetable.syncListen().catch(() => { /* 端口被占等失败不阻塞页面 */ });
+  }
+  panel.innerHTML = `
+    <div class="tool-hint">同一局域网（Wi-Fi）内的两台设备点对点同步；数据全程加密，仅经本机与对端，不上传任何服务器</div>
+    <div class="sync-block">
+      <div class="sync-block-title">本机设备</div>
+      <div class="sync-device-id">${escapeHtml(myId)}</div>
+    </div>
+    <div class="sync-block">
+      <div class="sync-block-title">配对</div>
+      <div class="sync-row">
+        <button type="button" class="sync-btn sync-wait-btn">等待配对（显示配对码）</button>
+        <button type="button" class="sync-btn sync-scan-btn">搜索等待中的设备</button>
+      </div>
+      <div class="sync-pair-area"></div>
+    </div>
+    <div class="sync-block">
+      <div class="sync-block-title">已配对设备（${pairs.length}）</div>
+      <div class="sync-devices"></div>
+    </div>
+    <div class="sync-block">
+      <div class="sync-block-title">同步日志</div>
+      <div class="sync-log-slot"></div>
+    </div>
+  `;
+  const pairArea = panel.querySelector('.sync-pair-area');
+  const devicesBox = panel.querySelector('.sync-devices');
+  const logSlot = panel.querySelector('.sync-log-slot');
+
+  // 日志块复用现有 buildSyncLogBlock
+  if (typeof buildSyncLogBlock === 'function') logSlot.appendChild(buildSyncLogBlock());
+
+  // ---- 配对码等待态渲染 ----
+  const renderPairArea = () => {
+    pairArea.innerHTML = '';
+    const st = syncToolState;
+    if (st.pairing && st.pairing.waiting) {
+      const box = document.createElement('div');
+      box.className = 'sync-pair-waiting';
+      const left = Math.max(0, Math.round((st.pairing.expiresAt - Date.now()) / 60000));
+      box.innerHTML = `
+        <div class="sync-code-label">把下面的 6 位配对码输入到另一台设备（约 ${left} 分钟内有效）</div>
+        <div class="sync-code">${escapeHtml(st.pairing.code)}</div>
+        <div class="sync-code-sub">本机地址：${st.pairing.ips.map(ip => escapeHtml(ip) + ':' + st.pairing.port).join('　') || '—'}</div>
+        <button type="button" class="sync-btn sync-cancel-wait">取消等待</button>
+      `;
+      box.querySelector('.sync-cancel-wait').addEventListener('click', async () => {
+        if (window.timetable && window.timetable.syncPairStop) await window.timetable.syncPairStop();
+        syncToolState.pairing = null;
+        renderPairArea();
+        showToast('已取消配对等待');
+      });
+      pairArea.appendChild(box);
+    } else if (st.found && st.found.length) {
+      // 发现设备列表：选中后输入配对码
+      const box = document.createElement('div');
+      box.className = 'sync-found';
+      for (const f of st.found) {
+        const row = document.createElement('div');
+        row.className = 'sync-found-row';
+        row.innerHTML = `
+          <span class="sync-found-name">${escapeHtml(f.device.name || f.device.deviceId)}</span>
+          <span class="sync-found-ip">${escapeHtml(f.ip)}:${f.port}</span>
+          <input type="text" class="sync-code-input" maxlength="6" inputmode="numeric" placeholder="6位配对码" title="输入对端屏幕上显示的 6 位配对码" />
+          <button type="button" class="sync-btn sync-connect-btn">配对</button>
+        `;
+        row.querySelector('.sync-connect-btn').addEventListener('click', async () => {
+          const code = row.querySelector('.sync-code-input').value.trim();
+          if (!/^\d{6}$/.test(code)) { showToast('请输入 6 位数字配对码'); return; }
+          const res = await window.timetable.syncPairConnect(f.ip, f.port, code);
+          if (res && res.ok) {
+            upsertPair(res.peerDevice);
+            showToast('配对成功：' + (res.peerDevice.name || res.peerDevice.deviceId));
+            syncToolState.found = [];
+            render();
+          } else {
+            showToast('配对失败：' + syncErrText(res && res.error));
+          }
+        });
+        box.appendChild(row);
+      }
+      pairArea.appendChild(box);
+    }
+  };
+
+  // ---- 设备列表渲染 ----
+  const renderDevices = () => {
+    devicesBox.innerHTML = '';
+    const list = loadSyncPairs();
+    if (!list.length) {
+      devicesBox.innerHTML = '<div class="empty-hint">— 暂无已配对设备 —</div>';
+      return;
+    }
+    for (const p of list) {
+      const row = document.createElement('div');
+      row.className = 'sync-device-row';
+      row.innerHTML = `
+        <span class="sync-device-name" title="${escapeHtml(p.deviceId)}">${escapeHtml(p.name || p.deviceId)}</span>
+        <span class="sync-device-meta">${escapeHtml(p.platform || '')}</span>
+        <input type="text" class="sync-ip-input" placeholder="IP（留空自动）" title="对端 IP；留空则用上次地址或同网段搜索" value="${escapeHtml(p.lastIp || '')}" />
+        <button type="button" class="sync-btn sync-now-btn">立即同步</button>
+        <button type="button" class="sync-btn danger sync-unpair-btn" title="解除配对（删除双方密钥）">解绑</button>
+      `;
+      row.querySelector('.sync-now-btn').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = '同步中…';
+        try {
+          const ipInput = row.querySelector('.sync-ip-input').value.trim();
+          await doSyncNow(p, ipInput);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '立即同步';
+        }
+      });
+      row.querySelector('.sync-unpair-btn').addEventListener('click', () => {
+        if (!confirm(`解除与「${p.name || p.deviceId}」的配对？\n双方密钥将被删除，需重新配对才能再同步。`)) return;
+        if (window.timetable && window.timetable.syncUnpair) window.timetable.syncUnpair(p.deviceId);
+        saveSyncPairs(loadSyncPairs().filter(x => x.deviceId !== p.deviceId));
+        addSyncLog('unpair', { detail: `解绑设备「${p.name || p.deviceId}」` });
+        render();
+      });
+      devicesBox.appendChild(row);
+    }
+  };
+
+  // ---- 配对等待（A 侧） ----
+  panel.querySelector('.sync-wait-btn').addEventListener('click', async () => {
+    if (!window.timetable || !window.timetable.syncPairStart) return;
+    const res = await window.timetable.syncPairStart();
+    if (res && res.ok) {
+      syncToolState.pairing = { waiting: true, code: res.code, port: res.port, ips: res.ips || [], expiresAt: res.expiresAt };
+      renderPairArea();
+      showToast('等待配对中，请在另一台设备输入配对码');
+    } else {
+      showToast('无法启动配对服务：' + syncErrText(res && res.error));
+    }
+  });
+  // A 侧配对成功推送：主进程 → 渲染层
+  if (window.timetable && window.timetable.onSyncPaired && !buildSyncTool._pairedBound) {
+    buildSyncTool._pairedBound = true;
+    window.timetable.onSyncPaired((info) => {
+      if (!info || !info.peerDevice) return;
+      upsertPair(info.peerDevice);
+      syncToolState.pairing = null;
+      addSyncLog('paired', { detail: `与「${info.peerDevice.name || info.peerDevice.deviceId}」完成配对` });
+      showToast('配对成功：' + (info.peerDevice.name || info.peerDevice.deviceId));
+      render();
+    });
+  }
+
+  // ---- 搜索等待中的设备（B 侧） ----
+  panel.querySelector('.sync-scan-btn').addEventListener('click', async () => {
+    if (!window.timetable || !window.timetable.syncPairScan) return;
+    syncToolState.found = [];
+    renderPairArea();
+    showToast('正在搜索同网段等待配对的设备…');
+    const found = await window.timetable.syncPairScan();
+    if (found && found.length) {
+      syncToolState.found = found;
+      renderPairArea();
+    } else {
+      showToast('未发现等待中的设备；可在对端点「等待配对」，本机再搜索，或手动输入 IP');
+      // 手动输入兜底
+      const box = document.createElement('div');
+      box.className = 'sync-found';
+      const row = document.createElement('div');
+      row.className = 'sync-found-row';
+      row.innerHTML = `
+        <input type="text" class="sync-manual-ip" placeholder="对端IP:端口" title="如 192.168.1.5:47812" />
+        <input type="text" class="sync-code-input" maxlength="6" inputmode="numeric" placeholder="6位配对码" />
+        <button type="button" class="sync-btn sync-manual-btn">配对</button>
+      `;
+      row.querySelector('.sync-manual-btn').addEventListener('click', async () => {
+        const addr = row.querySelector('.sync-manual-ip').value.trim();
+        const m = addr.match(/^(\d{1,3}(?:\.\d{1,3}){3}):(\d+)$/);
+        const code = row.querySelector('.sync-code-input').value.trim();
+        if (!m) { showToast('地址格式应为 IP:端口'); return; }
+        if (!/^\d{6}$/.test(code)) { showToast('请输入 6 位数字配对码'); return; }
+        const res = await window.timetable.syncPairConnect(m[1], Number(m[2]), code);
+        if (res && res.ok) {
+          upsertPair(res.peerDevice, m[1]);
+          showToast('配对成功：' + (res.peerDevice.name || res.peerDevice.deviceId));
+          render();
+        } else {
+          showToast('配对失败：' + syncErrText(res && res.error));
+        }
+      });
+      pairArea.innerHTML = '';
+      pairArea.appendChild(box).appendChild(row);
+    }
+  });
+
+  renderPairArea();
+  renderDevices();
+}
+
+// 配对成功/地址学习后写入或更新设备记录
+function upsertPair(peerDevice, ip) {
+  if (!peerDevice || !peerDevice.deviceId) return;
+  const list = loadSyncPairs();
+  const cur = list.find(x => x.deviceId === peerDevice.deviceId);
+  if (cur) {
+    cur.name = peerDevice.name || cur.name;
+    cur.platform = peerDevice.platform || cur.platform;
+    if (ip) cur.lastIp = ip;
+  } else {
+    list.push({
+      deviceId: peerDevice.deviceId,
+      name: peerDevice.name || peerDevice.deviceId,
+      platform: peerDevice.platform || '',
+      pairedAt: new Date().toISOString(),
+      lastIp: ip || '',
+      status: 'active'
+    });
+  }
+  saveSyncPairs(list);
+}
+
+// 同步错误码 → 用户可读文案
+function syncErrText(err) {
+  const s = String(err || '未知错误');
+  if (s.includes('pair_code_wrong')) return '配对码错误';
+  if (s.includes('pair_code_expired')) return '配对码已过期，请在对端重新点「等待配对」';
+  if (s.includes('connect_timeout') || s.includes('connect_failed')) return '连不上对端（不在线/不在同一网络/防火墙拦截）';
+  if (s.includes('unknown_peer') || s.includes('no_secret')) return '对端未配对或密钥已失效，请重新配对';
+  if (s.includes('decrypt')) return '数据校验失败（密钥不匹配）';
+  return s;
+}
+
+// 发起一次完整同步：hello → 发本机快照 → 收对端快照 → 合并应用
+async function doSyncNow(pair, ipInput) {
+  if (!window.timetable || !window.timetable.syncSend) { showToast('同步接口不可用'); return; }
+  // 1) 确定对端地址：UDP 发现（配对/同步服务均有应答）→ 手动输入 > 上次地址
+  let ip = ipInput || '';
+  let port = 0;
+  if (!ip) {
+    const found = await window.timetable.syncPairScan();
+    const hit = (found || []).find(f => f.device && f.device.deviceId === pair.deviceId);
+    if (hit) { ip = hit.ip; port = hit.port; }
+    else if (pair.lastIp) { ip = pair.lastIp; }   // 发现不到再试上次地址（端口仍需发现）
+  }
+  if (!ip || !port) {
+    showToast('找不到对端：请让对端打开「设备同步」页，或手动输入其 IP 后重试');
+    return;
+  }
+  // 2) 组装本机快照 → 发送 → 收回对端（已合并的）快照
+  const mySnap = buildSyncSnapshot();
+  const res = await window.timetable.syncSend({ ip, port, peerDeviceId: pair.deviceId, snapshot: mySnap });
+  if (!res || !res.ok) { showToast('同步失败：' + syncErrText(res && res.error)); return; }
+  // 3) 合并并应用（两端各自执行同一规则，结果收敛）
+  const merged = mergeSyncData(buildSyncSnapshot(), res.data || {});
+  applyMergedData(merged, pair.name);
+  // 地址学习：本次成功的地址写回设备记录，下次免搜索
+  if (ip && ip !== pair.lastIp) {
+    const list = loadSyncPairs();
+    const cur = list.find(x => x.deviceId === pair.deviceId);
+    if (cur) { cur.lastIp = ip; saveSyncPairs(list); }
+  }
+  showToast(`同步完成：事项 +${merged.stats.events.added}/更新 ${merged.stats.events.updated}/删除 ${merged.stats.events.deleted}`);
+}
+
+// 服务侧：被对端连接时，主进程把对端快照转来 → 本地合并 → 回包本地（合并后）快照
+// 结果：双向收敛到同一份数据（两端各执行一次同规则合并）
+if (window.timetable && window.timetable.onSyncExchangeRequest) {
+  window.timetable.onSyncExchangeRequest((req) => {
+    try {
+      const remote = (req && req.snapshot) || {};
+      const merged = mergeSyncData(buildSyncSnapshot(), remote);
+      applyMergedData(merged, (loadSyncPairs().find(x => x.deviceId === req.peerDeviceId) || {}).name);
+      // 回包「合并后的本地快照」，发起方再合并一次即收敛
+      window.timetable.syncExchangeRespond(buildSyncSnapshot());
+    } catch (e) {
+      window.timetable.syncExchangeRespond({});   // 异常兜底：不挂死对端
+    }
+  });
+}
+
 function buildSettings(panel) {
   panel.innerHTML = `
     <div class="set-group">
@@ -4426,9 +4843,9 @@ function buildSettings(panel) {
       <div class="set-row">
         <span class="set-text">
           <span class="set-name">局域网同步</span>
-          <span class="set-desc">预留功能，当前版本暂未开放</span>
+          <span class="set-desc">与同网络设备点对点同步项目与事项（加密，不上传服务器）</span>
         </span>
-        <button type="button" class="set-btn" id="syncPairBtn">配对新设备</button>
+        <button type="button" class="set-btn" id="syncPairBtn">打开设备同步</button>
       </div>
     </div>
     <div class="set-about" id="setAbout">日程侧边栏<br>所有数据仅保存在本机</div>
@@ -4667,17 +5084,12 @@ function buildSettings(panel) {
     });
   }
 
-  // ---- 设备同步（预留）：显示 deviceId，配对按钮提示开发中 ----
+  // ---- 设备同步：显示 deviceId，按钮跳转同步工具页 ----
   const deviceIdEl = panel.querySelector('#deviceIdDisplay');
   if (deviceIdEl) deviceIdEl.textContent = getDeviceId();
   const syncPairBtn = panel.querySelector('#syncPairBtn');
-  if (syncPairBtn && window.timetable && window.timetable.syncPairStart) {
-    syncPairBtn.addEventListener('click', async () => {
-      const res = await window.timetable.syncPairStart();
-      if (res && res.code === 'not_implemented') {
-        showToast('局域网同步功能开发中，敬请期待');
-      }
-    });
+  if (syncPairBtn) {
+    syncPairBtn.addEventListener('click', () => openTool('sync'));
   }
 }
 
@@ -5034,6 +5446,10 @@ if (window.timetable) {
 // ============ 初始化 ============
 // 生成本机设备标识（局域网同步预留）
 getDeviceId();
+// 上报主进程（配对/同步握手复用同一 deviceId）
+if (window.timetable && window.timetable.syncHello) {
+  try { window.timetable.syncHello(getDeviceId()); } catch { /* 主进程未就绪时下次启动再报 */ }
+}
 // 应用设置同步：剪贴板开关下发主进程（关 = 暂停记录）
 if (window.timetable) {
   const bootSt = loadAppSettings();

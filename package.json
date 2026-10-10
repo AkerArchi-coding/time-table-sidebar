@@ -7,6 +7,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "dev:sync-a": "electron . --dev --user-data-dir=.\\sandbox\\a --device-name=沙箱A",
+    "dev:sync-b": "electron . --dev --user-data-dir=.\\sandbox\\b --device-name=沙箱B",
     "test": "node --test \"tests/*.test.js\"",
     "dist:win": "electron-builder --win portable",
     "dist:mac": "electron-builder --mac dmg"

@@ -508,13 +508,90 @@ ipcMain.handle('data-dir-migrate', async (e, backup) => {
   return { ok: true, newDir, needRestart: true };
 });
 
-// ============ 扫码配对 / 局域网同步（预留接口，暂未实现实际网络通信） ============
-// 这些 handler 仅返回 not_implemented，为未来局域网点对点同步预留数据结构与调用入口。
-const SYNC_NOT_IMPL = { ok: false, code: 'not_implemented', hint: '局域网同步功能开发中，当前仅预留接口' };
-ipcMain.handle('sync-pair-start', () => SYNC_NOT_IMPL);
-ipcMain.handle('sync-pair-scan', () => SYNC_NOT_IMPL);
-ipcMain.handle('sync-send', () => SYNC_NOT_IMPL);
-ipcMain.handle('sync-receive-cb', () => SYNC_NOT_IMPL);
+// ============ 局域网同步（P3.4）：配对 + 快照交换 ============
+// 加密/墓碑合并在独立模块；本文件只做 IPC 桥接与生命周期管理。
+// secret 存 userData/sync-secrets.json（不进 localStorage/备份）。
+const syncServer = require('./main/sync-server');
+syncServer.init(() => path.join(app.getPath('userData'), 'sync-secrets.json'));
+
+// 本机设备信息（渲染层 deviceId 经 sync-hello 上报后主进程缓存，配对/同步握手复用）
+let myDeviceInfo = { deviceId: '', name: os.hostname(), platform: process.platform };
+ipcMain.on('sync-hello', (_e, deviceId) => {
+  if (typeof deviceId === 'string' && deviceId) myDeviceInfo.deviceId = deviceId;
+});
+
+// A 侧「等待配对」：起临时服务 + 6 位码 + UDP 应答；成功配对后回推事件给渲染层
+ipcMain.handle('sync-pair-start', async () => {
+  try {
+    const r = await syncServer.startPairWait(myDeviceInfo, (info) => {
+      if (sidebar && !sidebar.isDestroyed()) sidebar.webContents.send('sync-paired', info);
+    });
+    return r;
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+// B 侧发现等待中的设备（UDP 广播）
+ipcMain.handle('sync-pair-scan', () => syncServer.scanPairingDevices());
+// B 侧握手：输入配对码连接指定设备
+ipcMain.handle('sync-pair-connect', (_e, o) => {
+  const { ip, port, code } = o || {};
+  return syncServer.pairConnect(ip, port, code, myDeviceInfo);
+});
+// 取消等待/关停服务
+ipcMain.handle('sync-pair-stop', () => { syncServer.stopServer(); return { ok: true }; });
+ipcMain.handle('sync-server-status', () => syncServer.serverStatus());
+
+// 同步会话：发起方调 sync-send（渲染层组装好快照对象），返回对端快照
+ipcMain.handle('sync-send', async (_e, payload) => {
+  const { ip, port, peerDeviceId, snapshot } = payload || {};
+  if (!ip || !port || !peerDeviceId) return { ok: false, error: 'params_missing' };
+  // 先 hello 握手确认对端在线且密钥有效，再交换快照
+  const hello = await syncServer.postEncrypted(ip, port, '/hello', peerDeviceId, { device: myDeviceInfo });
+  if (!hello.ok) return { ok: false, error: 'hello_failed:' + hello.error };
+  const ex = await syncServer.postEncrypted(ip, port, '/sync/exchange', peerDeviceId, snapshot || {});
+  return ex;   // { ok:true, data: 对端快照 } 或 { ok:false, error }
+});
+
+// 服务侧：被对端连接时触发（渲染层提供合并后的本地快照回包）
+// 渲染层通过 onSyncExchangeRequest 收到请求 → 处理后用 syncExchangeRespond 回包
+let pendingExchange = null;   // { peerId, resolve }
+ipcMain.handle('sync-listen', async () => {
+  try {
+    const r = await syncServer.startSyncServer(
+      myDeviceInfo,
+      null,   // hello 无需渲染层介入
+      (peerId, remoteSnapshot) => new Promise((resolve) => {
+        if (!sidebar || sidebar.isDestroyed()) { resolve({}); return; }
+        pendingExchange = { peerId, resolve };
+        sidebar.webContents.send('sync-exchange-request', { peerDeviceId: peerId, snapshot: remoteSnapshot });
+        // 渲染层 20 秒内未响应 → 空快照兜底（不挂死对端）
+        setTimeout(() => {
+          if (pendingExchange && pendingExchange.peerId === peerId) {
+            pendingExchange = null;
+            resolve({});
+          }
+        }, 20000);
+      })
+    );
+    return r;
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+ipcMain.on('sync-exchange-respond', (_e, mySnapshot) => {
+  if (pendingExchange) {
+    const p = pendingExchange;
+    pendingExchange = null;
+    p.resolve(mySnapshot || {});
+  }
+});
+
+// 查询/解绑：渲染层设备列表需要本机端口信息；解绑只删 secret（记录由渲染层删）
+ipcMain.handle('sync-unpair', (_e, deviceId) => {
+  syncServer.deleteSecret(deviceId);
+  return { ok: true };
+});
 
 // ============ 全局快捷键（P3.3）：Ctrl+Alt+T 唤出/收起，Ctrl+Alt+N 快速添加 ============
 // 注册失败（被其他程序占用）自动降级为关，返回实际生效状态；不做自由录制。
@@ -984,6 +1061,18 @@ function processDataDirMarker() {
   } catch { /* 标记损坏则忽略，保持默认目录 */ }
 }
 
+// 沙箱双实例：--user-data-dir=<目录> 隔离数据目录（dev:sync-a/b 用），必须在 ready 前 setPath
+{
+  const udArg = process.argv.find(a => a.startsWith('--user-data-dir='));
+  if (udArg) {
+    const dir = udArg.slice('--user-data-dir='.length);
+    if (dir) { try { fs.mkdirSync(dir, { recursive: true }); app.setPath('userData', dir); } catch { /* 失败用默认 */ } }
+  }
+  // 沙箱设备名：--device-name=<名字> 覆盖主机名（区分同机双实例）
+  const dnArg = process.argv.find(a => a.startsWith('--device-name='));
+  if (dnArg) { const n = dnArg.slice('--device-name='.length); if (n) myDeviceInfo.name = n; }
+}
+
 app.whenReady().then(() => {
   processDataDirMarker();      // 必须在所有读取 userData 的操作之前
   electronPid = process.pid;
@@ -1026,6 +1115,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   app.isQuiting = true;
   try { globalShortcut.unregisterAll(); } catch { /* 退出阶段反注册失败可忽略 */ }
+  try { syncServer.stopServer(); } catch { /* 同步服务关停失败可忽略 */ }
 });
 
 app.on('window-all-closed', () => {
