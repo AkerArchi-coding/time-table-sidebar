@@ -2000,3 +2000,97 @@ html, body {
 /* 周报操作 */
 .stat-week-actions { display: flex; gap: 6px; }
 .stat-week-actions .notes-btn { flex: 1; }
+
+/* ============ P3.2：重复事项 ============ */
+/* 表单「重复」行（复用提醒行密度） */
+.add-form-row-recur {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.add-form-row-recur select,
+.add-form-row-recur input {
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 11px;
+}
+.add-form-row-recur select:focus,
+.add-form-row-recur input:focus { outline: none; border-color: #4a90d9; }
+/* 事项行重复徽标 */
+.event-recur-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.75;
+  cursor: default;
+}
+
+/* ============ P3.2：全局搜索 ============ */
+.search-box {
+  margin-bottom: 8px;
+}
+.search-input {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 12px;
+}
+.search-input:focus { outline: none; border-color: #4a90d9; }
+.search-input::placeholder { color: rgba(255, 255, 255, 0.35); }
+.search-results { display: flex; flex-direction: column; gap: 3px; }
+.search-hit { cursor: pointer; }
+.search-hit:hover { background: rgba(74, 144, 217, 0.14); }
+
+/* ============ P3.2：批量操作 ============ */
+.top-add-row {
+  display: flex;
+  gap: 6px;
+}
+.top-add-row .top-add { flex: 1; }
+.top-add.batch-enter {
+  background: rgba(255, 255, 255, 0.10);
+}
+.batch-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 8px;
+  background: rgba(74, 144, 217, 0.14);
+  border: 1px solid rgba(74, 144, 217, 0.25);
+}
+.batch-btn {
+  padding: 4px 8px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.10);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.batch-btn:hover { background: rgba(255, 255, 255, 0.20); }
+.batch-btn:disabled { opacity: 0.35; cursor: default; }
+.batch-btn:disabled:hover { background: rgba(255, 255, 255, 0.10); }
+.batch-btn.danger { color: #ff8a80; }
+.batch-btn.exit { margin-left: auto; background: rgba(74, 144, 217, 0.30); }
+.batch-count {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 2px;
+}
+.event-item.batch-selected {
+  background: rgba(74, 144, 217, 0.22);
+  outline: 1px solid rgba(74, 144, 217, 0.45);
+  cursor: pointer;
+}

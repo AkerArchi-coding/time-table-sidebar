@@ -124,6 +124,8 @@ function loadEvents() {
       if (ev.snoozeUntil === undefined) ev.snoozeUntil = 0;
       // 同步预留：最后同步时间
       if (ev.lastSyncAt === undefined) ev.lastSyncAt = '';
+      // 重复规则（P3.2）：null = 不重复；命中日由虚拟投影动态生成
+      if (ev.recur === undefined) ev.recur = null;
     }
     eventsCache = list;
     return list;
@@ -133,10 +135,87 @@ function saveEvents(list) {
   eventsCache = Array.isArray(list) ? list : [];
   localStorage.setItem('events', JSON.stringify(eventsCache));
 }
+// ---- 重复事项（P3.2）：不物理展开副本，按日虚拟投影 ----
+const RECUR_FREQS = ['daily', 'weekdays', 'weekly', 'monthly'];
+const RECUR_FREQ_LABELS = { none: '不重复', daily: '每天', weekdays: '工作日', weekly: '每周', monthly: '每月' };
+
+// 事项是否启用了有效重复规则
+function isRecurOn(ev) {
+  return !!(ev && ev.recur && RECUR_FREQS.includes(ev.recur.freq));
+}
+
+// 判断重复规则是否命中目标日期（startKey/targetKey 均为 YYYY-MM-DD）
+// 规则：起始日必命中（保证锚点日可见）；目标早于起始不命中；until 截止（含当天）；无开始日不投影
+function recurMatchesDate(recur, startKey, targetKey) {
+  if (!recur || !RECUR_FREQS.includes(recur.freq)) return false;
+  if (!startKey || !targetKey) return false;
+  if (targetKey < startKey) return false;
+  if (recur.until && targetKey > recur.until) return false;
+  if (targetKey === startKey) return true;   // 起始日恒命中（weekdays 规则起始日为周末时也可见）
+  const s = parseDateKey(startKey), t = parseDateKey(targetKey);
+  const freq = recur.freq;
+  if (freq === 'daily') {
+    const iv = Math.max(1, Number(recur.interval) || 1);
+    return Math.round((t - s) / 86400000) % iv === 0;
+  }
+  if (freq === 'weekdays') {
+    const wd = t.getDay();
+    return wd >= 1 && wd <= 5;
+  }
+  if (freq === 'weekly') {
+    const iv = Math.max(1, Number(recur.interval) || 1);
+    if (t.getDay() !== s.getDay()) return false;
+    return Math.round((t - s) / 86400000) % (7 * iv) === 0;
+  }
+  if (freq === 'monthly') {
+    // 月中同日号；目标月没有该日号自然不命中（如 1/31 在 2 月）
+    return t.getDate() === s.getDate();
+  }
+  return false;
+}
+
+// 重复事项完成态（按日 override，key = 模板id|日期；勾选虚拟事项只写这里，不改模板 done）
+let recurDoneCache = null;
+function loadRecurDone() {
+  if (recurDoneCache) return recurDoneCache;
+  try { recurDoneCache = JSON.parse(localStorage.getItem('recurDone') || '{}'); }
+  catch { recurDoneCache = {}; }
+  return recurDoneCache;
+}
+function recurDoneGet(evId, key) {
+  return !!loadRecurDone()[evId + '|' + key];
+}
+function recurDoneSet(evId, key, val) {
+  const map = loadRecurDone();
+  if (val) map[evId + '|' + key] = true;
+  else delete map[evId + '|' + key];
+  recurDoneCache = map;
+  localStorage.setItem('recurDone', JSON.stringify(map));
+}
+
+// 生成某日虚拟事项视图：复制模板字段 + 复合 id + 覆盖完成态（纯视图对象，不改模板数据）
+function makeVirtualEvent(ev, key) {
+  return {
+    ...ev,
+    id: ev.id + '@' + key,        // 复合键：模板id@日期
+    _templateId: ev.id,
+    _recurDate: key,
+    date: key, startDate: key, endDate: key,
+    done: recurDoneGet(ev.id, key)
+  };
+}
+
 function getEventsByDate(key) {
-  return sortDayEvents(
-    loadEvents().filter(e => eventSpansDate(e, key))   // 多日事项在覆盖的每一天都显示
-  );
+  const list = [];
+  for (const ev of loadEvents()) {
+    if (isRecurOn(ev)) {
+      // 重复事项：起始日及后续命中日统一走虚拟投影（完成态按日记录，三处口径一致）
+      if (recurMatchesDate(ev.recur, eventStart(ev), key)) list.push(makeVirtualEvent(ev, key));
+    } else if (eventSpansDate(ev, key)) {
+      list.push(ev);              // 多日事项在覆盖的每一天都显示
+    }
+  }
+  return sortDayEvents(list);
 }
 // 按开始日期排序（无日期排最后），再按时间
 function sortEvents(list) {
@@ -268,6 +347,7 @@ function switchView(v) {
   // 手动切换视图时放弃进行中的同步预览（面板只挂在项目视图顶部）
   discardSyncPreview();
   closeTool();                       // 切回视图 = 退出工具覆盖层
+  if (batchMode) { batchMode = false; batchSel.clear(); }   // 离开事项视图即退出批量模式
   currentView = v;
   render();
 }
@@ -325,6 +405,11 @@ function buildEventItem(ev, opts = {}) {
   item.style.borderLeftColor = cat.color;   // 分类竖条颜色
 
   let badges = '';
+  if (isRecurOn(ev)) {
+    const r = ev.recur;
+    const rl = RECUR_FREQ_LABELS[r.freq] || '重复';
+    badges += `<span class="event-recur-badge" title="${rl}重复${r.until ? '，至 ' + r.until : ''}">🔁</span>`;
+  }
   if (opts.showDate) {
     const s = eventStart(ev), e = eventEnd(ev);
     let d = '—';
@@ -343,7 +428,7 @@ function buildEventItem(ev, opts = {}) {
     <span class="event-time">${escapeHtml(ev.time || '')}</span>
     ${badges}
     <span class="event-title">${escapeHtml(ev.title)}</span>
-    <span class="event-del" data-id="${ev.id}" title="删除">×</span>
+    ${ev._templateId ? '' : `<span class="event-del" data-id="${ev.id}" title="删除">×</span>`}
   `;
   return item;
 }
@@ -361,6 +446,8 @@ function buildTaskForm(opts = {}) {
   const preUrgency = ev ? (ev.urgency || 'normal') : 'normal';
   const preProject = ev ? (ev.projectId || '') : '';
   const preRemind = ev ? (ev.remindAhead || 0) : 0;
+  const preRecurFreq = ev && ev.recur && RECUR_FREQ_LABELS[ev.recur.freq] ? ev.recur.freq : 'none';
+  const preRecurUntil = ev && ev.recur ? (ev.recur.until || '') : '';
 
   const sel = (val, cur) => val === cur ? ' selected' : '';
   const form = document.createElement('div');
@@ -401,6 +488,12 @@ function buildTaskForm(opts = {}) {
       <select class="ev-remind" title="到达前多少分钟提醒（仅当设置了时间）">
         ${[0, 5, 10, 15, 30].map(m => `<option value="${m}"${sel(String(m), String(preRemind))}>${m === 0 ? '不提前' : m + ' 分钟前'}</option>`).join('')}
       </select>
+    </div>
+    <div class="add-form-row-recur">重复
+      <select class="ev-recur" title="重复规则（按开始日期起算）">
+        ${Object.keys(RECUR_FREQ_LABELS).map(f => `<option value="${f}"${sel(f, preRecurFreq)}>${RECUR_FREQ_LABELS[f]}</option>`).join('')}
+      </select>
+      <input type="date" class="ev-recur-until" title="重复截止日期（可留空=一直重复）" value="${preRecurUntil}" />
     </div>
     <div class="add-form-row3">
       <button class="cancel">取消</button>
@@ -478,6 +571,11 @@ function bindFormEvents(form) {
       projectId,
       remindAhead: Number(form.querySelector('.ev-remind').value) || 0
     };
+    // 重复规则：不重复存 null；有规则时必须以开始日期为锚（无开始日期的规则不投影）
+    const recurFreq = form.querySelector('.ev-recur').value;
+    fields.recur = (recurFreq === 'none')
+      ? null
+      : { freq: recurFreq, interval: 1, until: form.querySelector('.ev-recur-until').value || '' };
     if (form.dataset.editId) updateEvent(form.dataset.editId, fields);
     else addEvent(fields);
     closeForm(form);
@@ -506,7 +604,10 @@ function bindFormEvents(form) {
       else if (s.classList.contains('ev-urgency')) s.value = 'normal';
       else if (s.classList.contains('ev-project')) s.value = '';
       else if (s.classList.contains('ev-remind')) s.value = '0';
+      else if (s.classList.contains('ev-recur')) s.value = 'none';
     });
+    const recurUntil = f.querySelector('.ev-recur-until');
+    if (recurUntil) recurUntil.value = '';
     if (window.timetable) window.timetable.setEditing(false);
   };
 
@@ -1160,7 +1261,8 @@ function buildGantt(project) {
     leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
   } else {
     for (const t of tasks) {
-      leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</div>`;
+      const recurNote = isRecurOn(t) ? `（${RECUR_FREQ_LABELS[t.recur.freq] || '重复'}重复）` : '';
+      leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title + recurNote)}">${escapeHtml(t.title)}${isRecurOn(t) ? ' 🔁' : ''}</div>`;
     }
   }
 
@@ -1321,7 +1423,8 @@ function buildOverviewGantt() {
         const off = Math.round((parseDateKey(eventStart(t)) - parseDateKey(minK)) / 86400000);
         const dur = durationDays(eventStart(t), eventEnd(t));
         const pjPrefix = g.p ? `${escapeHtml(gname)} · ` : '';
-        leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</div>`;
+        const recurNote = isRecurOn(t) ? `（${RECUR_FREQ_LABELS[t.recur.freq] || '重复'}重复）` : '';
+        leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title + recurNote)}">${escapeHtml(t.title)}${isRecurOn(t) ? ' 🔁' : ''}</div>`;
         rowsHtml += `
           <div class="gantt-row" style="height:${GANTT_ROW_H}px">
             <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
@@ -1508,21 +1611,122 @@ function openTaskEditor(ev) {
 }
 
 // ============ 全部事项视图 ============
+// 批量操作状态（仅事项视图内有效；切换视图/工具时重置）
+let batchMode = false;
+const batchSel = new Set();
+
+// 批量写公共字段（改分类/改项目/标记完成）；涉及项目变动统一 bump 版本号
+function batchPatchFields(ids, patch) {
+  const all = loadEvents();
+  const pids = new Set();
+  for (const ev of all) {
+    if (!ids.includes(ev.id)) continue;
+    Object.assign(ev, patch);
+    ev.updatedAt = new Date().toISOString();
+    if (ev.projectId) pids.add(ev.projectId);
+  }
+  saveEvents(all);
+  pids.forEach(p => bumpProjectRevision(p));
+  render();
+}
+
+// 批量删除（一次确认，列出数量；不改单条删除的无确认行为）
+function batchDeleteEvents(ids) {
+  const all = loadEvents();
+  const pids = new Set();
+  for (const id of ids) {
+    const ev = all.find(e => e.id === id);
+    if (ev && ev.projectId) pids.add(ev.projectId);
+  }
+  saveEvents(all.filter(e => !ids.includes(e.id)));
+  pids.forEach(p => bumpProjectRevision(p));
+  render();
+}
+
+// 批量操作条（事项视图顶部；分类选择复用右键菜单面板）
+function buildBatchBar(all) {
+  const bar = document.createElement('div');
+  bar.className = 'batch-bar';
+  const n = batchSel.size;
+  const dis = n ? '' : 'disabled';
+  bar.innerHTML = `
+    <button class="batch-btn" data-act="all">${n === all.length && all.length ? '全不选' : '全选'}</button>
+    <button class="batch-btn" data-act="cat" ${dis}>改分类</button>
+    <button class="batch-btn" data-act="proj" ${dis}>改项目</button>
+    <button class="batch-btn" data-act="done" ${dis}>标记完成</button>
+    <button class="batch-btn danger" data-act="del" ${dis}>删除</button>
+    <span class="batch-count">${n ? `已选 ${n} 项` : '点击事项行选择'}</span>
+    <button class="batch-btn exit" data-act="exit">完成批量</button>
+  `;
+  bar.querySelectorAll('.batch-btn').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const act = btn.dataset.act;
+    const ids = [...batchSel];
+    if (act === 'all') {
+      if (batchSel.size === all.length && all.length) batchSel.clear();
+      else all.forEach(ev => batchSel.add(ev.id));
+      render();
+    } else if (act === 'exit') {
+      batchMode = false; batchSel.clear(); render();
+    } else if (!n) {
+      return;   // 未选中任何项时其余操作禁用
+    } else if (act === 'cat') {
+      // 借用右键菜单容器展示三个分类项（定位到按钮下方）
+      const r = btn.getBoundingClientRect();
+      showItems(r.left, r.bottom + 4);
+      ctxItems.innerHTML = Object.keys(CATEGORIES)
+        .map(c => `<div class="ctx-item" data-action="${c}">${CATEGORIES[c].label}</div>`).join('');
+      bindItemHandlers({
+        work: () => { batchPatchFields(ids, { category: 'work' }); batchMode = false; batchSel.clear(); },
+        personal: () => { batchPatchFields(ids, { category: 'personal' }); batchMode = false; batchSel.clear(); },
+        family: () => { batchPatchFields(ids, { category: 'family' }); batchMode = false; batchSel.clear(); }
+      });
+    } else if (act === 'proj') {
+      openProjectPicker('调整到哪个项目', null, (pid) => {
+        batchPatchFields(ids, { projectId: pid || null });
+        batchMode = false; batchSel.clear();
+      });
+    } else if (act === 'done') {
+      batchPatchFields(ids, { done: true });
+      batchMode = false; batchSel.clear();
+    } else if (act === 'del') {
+      if (confirm(`删除选中的 ${n} 项？此操作不可撤销。`)) {
+        batchDeleteEvents(ids);
+        batchMode = false; batchSel.clear();
+      }
+    }
+  }));
+  return bar;
+}
+
 function renderTasks() {
   const all = sortEvents(loadEvents());
-  setHeader('全部事项', `共 ${all.length} 项`, false);
+  setHeader('全部事项', batchMode ? `已选 ${batchSel.size} 项` : `共 ${all.length} 项`, false);
   weekList.innerHTML = '';
 
-  // 新建事项入口（未固定日期/项目）
-  const block = document.createElement('div');
-  block.className = 'add-block';
-  const addBtn = document.createElement('button');
-  addBtn.className = 'top-add';
-  addBtn.textContent = '+ 新建事项';
-  const form = buildTaskForm({});
-  block.appendChild(addBtn);
-  block.appendChild(form);
-  weekList.appendChild(block);
+  // 批量模式：置顶操作条，隐藏新建入口避免干扰
+  if (batchMode) weekList.appendChild(buildBatchBar(all));
+
+  if (!batchMode) {
+    // 新建事项入口（未固定日期/项目）
+    const block = document.createElement('div');
+    block.className = 'add-block';
+    const btnRow = document.createElement('div');
+    btnRow.className = 'top-add-row';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'top-add';
+    addBtn.textContent = '+ 新建事项';
+    const batchBtn = document.createElement('button');
+    batchBtn.className = 'top-add batch-enter';
+    batchBtn.textContent = '批量管理';
+    batchBtn.addEventListener('click', () => { batchMode = true; batchSel.clear(); render(); });
+    btnRow.appendChild(addBtn);
+    btnRow.appendChild(batchBtn);
+    const form = buildTaskForm({});
+    block.appendChild(btnRow);
+    block.appendChild(form);
+    weekList.appendChild(block);
+  }
 
   const list = document.createElement('div');
   list.className = 'event-list';
@@ -1532,7 +1736,20 @@ function renderTasks() {
     hint.textContent = '— 暂无事项 —';
     list.appendChild(hint);
   } else {
-    for (const ev of all) list.appendChild(buildEventItem(ev, { showDate: true, showProject: true }));
+    for (const ev of all) {
+      const item = buildEventItem(ev, { showDate: true, showProject: true });
+      if (batchMode) {
+        // 多选模式：整行点击切换选中；去掉单点控件避免与 bindViewEvents 的绑定冲突
+        const chk = item.querySelector('.event-check'); if (chk) chk.remove();
+        const del = item.querySelector('.event-del'); if (del) del.remove();
+        item.classList.toggle('batch-selected', batchSel.has(ev.id));
+        item.addEventListener('click', () => {
+          if (batchSel.has(ev.id)) batchSel.delete(ev.id); else batchSel.add(ev.id);
+          render();
+        });
+      }
+      list.appendChild(item);
+    }
   }
   weekList.appendChild(list);
 
@@ -1554,6 +1771,7 @@ function addEvent(fields, skipRender) {
     urgency: fields.urgency || 'normal',
     projectId: fields.projectId || null,
     description: '',
+    recur: fields.recur || null,    // 重复规则（P3.2）：null = 不重复
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -1573,7 +1791,7 @@ function updateEvent(id, fields) {
       ev.endDate = fields.endDate || fields.startDate;
       ev.date = fields.startDate;
     }
-    for (const k of ['time', 'title', 'category', 'urgency', 'projectId']) {
+    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur']) {
       if (fields[k] !== undefined) ev[k] = fields[k];
     }
     ev.updatedAt = new Date().toISOString();
@@ -1585,6 +1803,8 @@ function updateEvent(id, fields) {
 }
 
 function deleteEvent(id) {
+  // 虚拟事项（模板id@日期）：删除作用于整个重复系列（模板）
+  if (id.includes('@')) id = id.slice(0, id.lastIndexOf('@'));
   const all = loadEvents();
   const ev = all.find(e => e.id === id);
   saveEvents(all.filter(e => e.id !== id));
@@ -1593,6 +1813,14 @@ function deleteEvent(id) {
 }
 
 function toggleDone(id) {
+  // 虚拟事项（重复投影）：完成态按日 override，不改模板 done
+  if (id.includes('@')) {
+    const i = id.lastIndexOf('@');
+    const evId = id.slice(0, i), dKey = id.slice(i + 1);
+    recurDoneSet(evId, dKey, !recurDoneGet(evId, dKey));
+    render();
+    return;
+  }
   const all = loadEvents();
   const ev = all.find(e => e.id === id);
   if (ev) {
@@ -1642,27 +1870,29 @@ function moveEventToProject(id, pid) {
   }
 }
 
-// 完成指定日期的全部事项（含当天处于执行区间内的多日事项）
+// 完成指定日期的全部事项（含重复事项该日投影 → 写按日 override）
 function markDateDone(dateKeyStr) {
-  const all = loadEvents();
   let changed = false;
-  for (const ev of all) {
-    if (eventSpansDate(ev, dateKeyStr) && !ev.done) { ev.done = true; changed = true; }
+  for (const view of getEventsByDate(dateKeyStr)) {
+    if (view._templateId) {
+      if (!recurDoneGet(view._templateId, dateKeyStr)) { recurDoneSet(view._templateId, dateKeyStr, true); changed = true; }
+    } else if (!view.done) { view.done = true; changed = true; }
   }
-  if (changed) { saveEvents(all); render(); }
+  if (changed) { saveEvents(loadEvents()); render(); }
 }
 
-// 完成日历当前可见范围的全部事项（区间与可见范围有交集即完成）
+// 完成日历当前可见范围的全部事项（逐日投影，重复事项按日记 override）
 function markAllDone() {
-  const all = loadEvents();
-  const rangeEnd = dateKey(addDays(rangeStart, RANGE_DAYS - 1));
   let changed = false;
-  for (const ev of all) {
-    const s = eventStart(ev), e = eventEnd(ev);
-    const inRange = s && !(e < dateKey(rangeStart)) && !(s > rangeEnd);
-    if (inRange && !ev.done) { ev.done = true; changed = true; }
+  for (let i = 0; i < RANGE_DAYS; i++) {
+    const key = dateKey(addDays(rangeStart, i));
+    for (const view of getEventsByDate(key)) {
+      if (view._templateId) {
+        if (!recurDoneGet(view._templateId, key)) { recurDoneSet(view._templateId, key, true); changed = true; }
+      } else if (!view.done) { view.done = true; changed = true; }
+    }
   }
-  if (changed) { saveEvents(all); render(); }
+  if (changed) { saveEvents(loadEvents()); render(); }
 }
 
 // ============ 项目操作 ============
@@ -2698,7 +2928,14 @@ function checkReminders() {
   const tk = dateKey(now);
   if (tk !== remindedDate) { remindedDate = tk; remindedKeys.clear(); }   // 跨日重置
   for (const ev of loadEvents()) {
-    if (ev.done || !ev.time || eventStart(ev) !== tk) continue;
+    if (!ev.time) continue;
+    // 当日有效性：重复事项按命中日判断 + 完成态查按日 override；普通事项按开始日期
+    if (isRecurOn(ev)) {
+      if (!recurMatchesDate(ev.recur, eventStart(ev), tk)) continue;
+      if (recurDoneGet(ev.id, tk)) continue;
+    } else if (ev.done || eventStart(ev) !== tk) {
+      continue;
+    }
     const key = ev.id + '|' + tk;
     if (remindedKeys.has(key)) continue;
     // 触发时间 = 到点时间 - 提前提醒分钟数
@@ -2736,6 +2973,7 @@ const TOOL_DEFS = {
   pomodoro:  { title: '番茄钟',   pinEditing: false },
   progress:  { title: '今日进度', pinEditing: false },
   stats:     { title: '统计',     pinEditing: false },
+  search:    { title: '搜索',     pinEditing: false },
   notes:     { title: '快速便签', pinEditing: true },
   weather:   { title: '天气',     pinEditing: false },
   sys:       { title: '系统资源', pinEditing: false },
@@ -2770,6 +3008,7 @@ function renderTool() {
   else if (currentTool === 'pomodoro') buildPomodoro(panel);
   else if (currentTool === 'progress') buildProgress(panel);
   else if (currentTool === 'stats') buildStatsPanel(panel);
+  else if (currentTool === 'search') buildSearchPanel(panel);
   else if (currentTool === 'notes') buildNotes(panel);
   else if (currentTool === 'weather') buildWeather(panel);
   else if (currentTool === 'sys') buildSys(panel);
@@ -3367,6 +3606,72 @@ function buildStatsPanel(panel) {
       btn.disabled = false;
     }
   });
+}
+
+// ---- 工具六：全局搜索（跨全部日期，匹配标题/备注） ----
+// 搜索纯函数：不区分大小写，按开始日期升序、无日期排最后
+function searchEvents(events, q) {
+  const kw = String(q || '').trim().toLowerCase();
+  if (!kw) return [];
+  const hit = (s) => String(s || '').toLowerCase().includes(kw);
+  return events
+    .filter(ev => hit(ev.title) || hit(ev.description))
+    .sort((a, b) => {
+      const da = eventStart(a), db = eventStart(b);
+      if (!!da !== !!db) return da ? -1 : 1;
+      return (da || '').localeCompare(db || '');
+    });
+}
+
+// 点击搜索结果：关闭工具，翻页定位到事项所在周（无日期 → 事项视图），再打开编辑
+function gotoSearchResult(ev) {
+  closeTool();
+  const startKey = eventStart(ev);
+  if (startKey) {
+    rangeStart = addDays(parseDateKey(startKey), -1);   // 事项落在第二张卡，与初始布局一致
+    switchView('calendar');
+  } else {
+    switchView('tasks');
+  }
+  openTaskEditor(ev);
+}
+
+function buildSearchPanel(panel) {
+  panel.innerHTML = `
+    <div class="search-box">
+      <input type="text" class="search-input" placeholder="搜索事项标题或备注..." />
+    </div>
+    <div class="search-results"></div>
+  `;
+  const input = panel.querySelector('.search-input');
+  const results = panel.querySelector('.search-results');
+
+  const paint = () => {
+    results.innerHTML = '';
+    const q = input.value;
+    if (!q.trim()) {
+      results.innerHTML = '<div class="empty-hint">输入关键字，跨日期搜索全部事项</div>';
+      return;
+    }
+    const list = searchEvents(loadEvents(), q);
+    if (!list.length) {
+      results.innerHTML = '<div class="empty-hint">— 无匹配结果 —</div>';
+      return;
+    }
+    for (const ev of list) {
+      const item = buildEventItem(ev, { showDate: true, showProject: true });
+      // 结果条目整条可点击跳转；去掉勾选/删除控件避免误导（勾选框在结果里无事件绑定）
+      const chk = item.querySelector('.event-check'); if (chk) chk.remove();
+      const del = item.querySelector('.event-del'); if (del) del.remove();
+      item.classList.add('search-hit');
+      item.addEventListener('click', () => gotoSearchResult(ev));
+      results.appendChild(item);
+    }
+  };
+
+  input.addEventListener('input', paint);
+  paint();
+  input.focus();
 }
 
 function buildProgress(panel) {
@@ -4320,14 +4625,20 @@ function showBlankMenu(x, y, targetDate) {
 
 // —— 事项菜单 ——
 function showEventMenu(x, y, eventId) {
-  const ev = loadEvents().find(e => e.id === eventId);
+  // 虚拟事项（重复投影）：完成走按日 override；其余操作（编辑/改期/调项目/删除）作用于模板
+  const isVirtual = eventId.includes('@');
+  const virtDate = isVirtual ? eventId.slice(eventId.lastIndexOf('@') + 1) : '';
+  const templateId = isVirtual ? eventId.slice(0, eventId.lastIndexOf('@')) : eventId;
+  const ev = loadEvents().find(e => e.id === templateId);
   if (!ev) return;
   showItems(x, y);
-  ctxMenu.dataset.eventId = eventId;
-  const doneLabel = ev.done ? '事项未完成' : '完成该事项';
+  ctxMenu.dataset.eventId = templateId;
+  const doneLabel = isVirtual
+    ? (recurDoneGet(templateId, virtDate) ? '取消完成此日' : '完成此日（仅当天）')
+    : (ev.done ? '事项未完成' : '完成该事项');
   ctxItems.innerHTML = `
     <div class="ctx-item" data-action="toggle">${doneLabel}</div>
-    <div class="ctx-item" data-action="edit">编辑事项</div>
+    <div class="ctx-item" data-action="edit">编辑事项${isVirtual ? '（重复系列）' : ''}</div>
     <div class="ctx-item" data-action="pomo">开始番茄钟</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-action="move">将完成时间调整到</div>
@@ -4336,20 +4647,24 @@ function showEventMenu(x, y, eventId) {
     <div class="ctx-item danger" data-action="delete">删除</div>
   `;
   bindItemHandlers({
-    toggle: () => toggleDone(eventId),
+    toggle: () => toggleDone(eventId),   // 复合 id → 按日 override；普通事项行为不变
     edit: () => openTaskEditor(ev),
     pomo: () => {
-      POMO.taskId = eventId;
+      POMO.taskId = templateId;
       POMO.taskTitle = ev.title;
       openTool('pomodoro');
     },
     move: () => openDatePicker('调整到哪一天', eventStart(ev) || dateKey(today()), (pickedDate) => {
-      moveEventToDate(eventId, pickedDate);
+      moveEventToDate(templateId, pickedDate);
     }),
     toProject: () => openProjectPicker('调整到哪个项目', ev.projectId, (pid) => {
-      moveEventToProject(eventId, pid);
+      moveEventToProject(templateId, pid);
     }),
-    delete: () => deleteEvent(eventId)
+    delete: () => {
+      // 重复系列删除影响所有未来日程，删除前确认一次
+      if (isVirtual && !confirm(`「${ev.title}」是重复事项，删除将移除全部重复日程，确定？`)) return;
+      deleteEvent(templateId);
+    }
   });
 }
 

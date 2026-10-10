@@ -17,7 +17,7 @@ const BACKUP_SCHEMA_VERSION = 1;
 
 // localStorage key 分类
 const SETTINGS_KEYS = ['appSettings', 'pomoCfg', 'daySort'];
-const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'deviceId', 'syncPairs'];
+const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'recurDone', 'deviceId', 'syncPairs'];
 const STATE_KEYS = ['remindedKeys', 'weatherCity', 'pomoStats'];   // 运行时状态，可一并备份但导入时不强制覆盖
 
 function safeGet(key) {
