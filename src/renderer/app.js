@@ -324,6 +324,54 @@ function removeCalSub(id) {
   saveCalSubs(loadCalSubs().filter(s => s.id !== id));
   calSubEventsMemo.delete(id);
   try { localStorage.removeItem(calSubCacheKey(id)); } catch { /* 缓存清理失败无碍 */ }
+  pruneCalEventStateForSub(id);   // P9.3：连带清理提醒配置与账本
+}
+
+// ---- P9.3 外部事件提醒配置 / 触发账本 ----
+// calEventCfg（进业务备份）：{ defaultAheadMin?:number, events: { [extKey]: {muted?:bool, aheadMin?:number} } }
+// calRemindLedger（仅本机运行态，不进备份）：{ [extKey|出现日]: {v:版本, ts:触发ms} }
+function loadCalEventCfg() {
+  try {
+    const o = JSON.parse(localStorage.getItem('calEventCfg') || '{}');
+    if (o && typeof o === 'object' && (!o.events || typeof o.events === 'object')) {
+      return { events: {}, ...o };
+    }
+  } catch { /* 损坏按空 */ }
+  return { events: {} };
+}
+function saveCalEventCfg(o) {
+  try { localStorage.setItem('calEventCfg', JSON.stringify(o)); }
+  catch (e) { notifyStorageFail(e); }
+}
+function calEventCfgOf(cfg, extKey) {
+  return (cfg && cfg.events && cfg.events[extKey]) || null;
+}
+function loadCalRemindLedger() {
+  try {
+    const o = JSON.parse(localStorage.getItem('calRemindLedger') || '{}');
+    if (o && typeof o === 'object' && !Array.isArray(o)) return o;
+  } catch { /* 损坏按空 */ }
+  return {};
+}
+function saveCalRemindLedger(m) {
+  try { localStorage.setItem('calRemindLedger', JSON.stringify(m)); }
+  catch (e) { notifyStorageFail(e); }
+}
+// 删除订阅时清理其全部 extKey 配置/账本（前缀 subId#）
+function pruneCalEventStateForSub(subId) {
+  const prefix = subId + '#';
+  const cfg = loadCalEventCfg();
+  let cfgChanged = false;
+  for (const k of Object.keys(cfg.events || {})) {
+    if (k.startsWith(prefix)) { delete cfg.events[k]; cfgChanged = true; }
+  }
+  if (cfgChanged) saveCalEventCfg(cfg);
+  const ledger = loadCalRemindLedger();
+  let ledChanged = false;
+  for (const k of Object.keys(ledger)) {
+    if (k.startsWith(prefix)) { delete ledger[k]; ledChanged = true; }
+  }
+  if (ledChanged) saveCalRemindLedger(ledger);
 }
 
 // 外部事件稳定身份：订阅 id + 事件 UID（同订阅内 RRULE 展开的重复事件仍是同一 key）
@@ -454,8 +502,98 @@ async function calSubRefreshOne(sub) {
   }
   return false;
 }
-// 订阅事件被成功替换后的差异联动（P9.2 空实现，P9.3 接入提醒账本清理；刷新主流程不依赖 P9.3）
-function onCalSubEventsReplaced(/* sub, oldEvs, newEvs */) {}
+// 订阅事件被成功替换后的账本联动（P9.3）：移除/取消/更新的事件清掉旧触发账本，
+// 使取消不再提醒、更新后可按新版本重新提醒一次；无差异则账本原样保留（刷新不重复提醒）
+function onCalSubEventsReplaced(sub, oldEvs, newEvs) {
+  const diff = diffSubExtEvents(sub.id, oldEvs || [], newEvs || []);
+  const dead = new Set([...diff.removed, ...diff.cancelledKeys, ...diff.updated]);
+  if (!dead.size) return;
+  const ledger = loadCalRemindLedger();
+  let changed = false;
+  for (const k of Object.keys(ledger)) {
+    const bar = k.indexOf('|');
+    if (bar > 0 && dead.has(k.slice(0, bar))) { delete ledger[k]; changed = true; }
+  }
+  if (changed) saveCalRemindLedger(ledger);
+}
+
+// ---- P9.3 外部事件到期提醒（纯判定，便于单测） ----
+const CAL_ALLDAY_REMIND_HOUR = 9;   // 全天事件固定在开始日 09:00 提醒
+// 事件在某一出现日的触发时刻 ms（全天 09:00；有具体时间按 HH:MM；再减提前量）；无法计算返回 null
+function extTriggerMs(ev, occDate, aheadMin) {
+  const d = parseDateKey(occDate);
+  if (!d || isNaN(d.getTime())) return null;
+  if (ev.allDay || !ev.time) {
+    d.setHours(CAL_ALLDAY_REMIND_HOUR, 0, 0, 0);
+  } else {
+    const [h, m] = String(ev.time).split(':').map(Number);
+    if (!Number.isFinite(h)) return null;
+    d.setHours(h, Number.isFinite(m) ? m : 0, 0, 0);
+  }
+  return d.getTime() - Math.max(0, Number(aheadMin) || 0) * 60000;
+}
+// 生效提前量优先级：单事件覆盖 → 来源 VALARM（remindAhead）→ 全局默认；已静音返回 null
+function extAheadMin(ev, perCfg, defaultAhead) {
+  if (perCfg && perCfg.muted) return null;
+  if (perCfg && Object.prototype.hasOwnProperty.call(perCfg, 'aheadMin') && Number.isFinite(Number(perCfg.aheadMin))) {
+    return Math.max(0, Number(perCfg.aheadMin));
+  }
+  if (ev.remindAhead !== null && ev.remindAhead !== undefined) return Math.max(0, Number(ev.remindAhead) || 0);
+  return Math.max(0, Number(defaultAhead) || 0);
+}
+// 到期外部事件列表（纯函数）。subs: 启用订阅；caches: {subId:[events]}；
+// cfg: loadCalEventCfg() 形态；ledger: loadCalRemindLedger() 形态；now: Date/ms。
+// 仅判定"出现日 = now 当日"且触发时刻已到、当日未结束的事件；已取消/静音跳过；
+// 账本存在且版本一致 → 不重复提醒；版本落后（事件已更新）→ 重新提醒。
+function dueExtReminders(subs, caches, cfg, ledger, now) {
+  const n = now instanceof Date ? now : new Date(now);
+  if (isNaN(n.getTime())) return [];
+  const tk = dateKey(n);
+  const dayEnd = parseDateKey(tk);
+  dayEnd.setHours(23, 59, 59, 999);
+  const endMs = dayEnd.getTime();
+  const defaultAhead = (cfg && Number.isFinite(Number(cfg.defaultAheadMin))) ? Number(cfg.defaultAheadMin) : 0;
+  const out = [];
+  for (const sub of subs || []) {
+    const evs = (caches && caches[sub.id]) || [];
+    for (const ev of evs) {
+      if (!ev || ev.status === 'cancelled') continue;
+      const s = eventStart(ev);
+      if (!s) continue;
+      let occDate;
+      if (isRecurOn(ev)) {
+        if (!recurMatchesDate(ev.recur, s, tk)) continue;
+        occDate = tk;
+      } else {
+        if (s !== tk) continue;     // 仅开始日提醒；多日事件不在末日补提醒
+        occDate = s;
+      }
+      const extKey = extEventKey(sub.id, ev);
+      const ahead = extAheadMin(ev, calEventCfgOf(cfg, extKey), defaultAhead);
+      if (ahead === null) continue;
+      const trig = extTriggerMs(ev, occDate, ahead);
+      if (trig === null || n.getTime() < trig || n.getTime() > endMs) continue;
+      const ledgerKey = extKey + '|' + occDate;
+      const version = extEventVersion(ev);
+      const rec = ledger[ledgerKey];
+      if (rec && rec.v === version) continue;
+      out.push({ extKey, ledgerKey, version, aheadMin: ahead, occDate, ev, sub });
+    }
+  }
+  return out;
+}
+// 通知/详情用的投影对象（与 getCalSubEventsByDate 字段口径一致）
+function extDetailProjection(sub, ev, occDate) {
+  const recurring = isRecurOn(ev);
+  const extKey = extEventKey(sub.id, ev);
+  return {
+    ...ev,
+    id: extKey + (recurring ? '@' + occDate : ''),
+    ...(recurring ? { date: occDate, startDate: occDate, endDate: occDate } : {}),
+    _subId: sub.id, _subName: sub.name, _extKey: extKey,
+    _cancelled: ev.status === 'cancelled'
+  };
+}
 
 // 刷新订阅；manual=true 刷新所有启用订阅（忽略频率），否则只刷新到期订阅。
 // silent 时不打断用户（仅在无工具/表单打开时补一次重绘）
@@ -493,6 +631,114 @@ function buildCalSubItem(ev) {
     showToast(`订阅事项（只读）：${ev.title}　${rng}${ev.time ? ' ' + ev.time : ''}`);
   });
   return item;
+}
+
+// ---- P9.3 外部事件详情浮层（只读 + 单事件提醒开关 + 显式存为本地事项） ----
+function closeCalEventDetail() {
+  const m = document.querySelector('.calev-mask');
+  if (m) m.remove();
+  if (window.timetable) { try { window.timetable.setEditing(false); } catch { /* 主进程不可用时忽略 */ } }
+}
+function openCalEventDetail(ev) {
+  closeCalEventDetail();
+  const sub = loadCalSubs().find(s => s.id === ev._subId) || null;
+  const extKey = ev._extKey || extEventKey(ev._subId || '', ev);
+  const cfgAll = loadCalEventCfg();
+  const per = calEventCfgOf(cfgAll, extKey) || {};
+  const defaultAhead = Number(loadAppSettings().remindAheadDefault) || 0;
+  const effectiveAhead = extAheadMin(ev, per, defaultAhead);
+  const syncedAt = sub ? calSubSyncedAt(sub.id) : '';
+  const multi = ev.endDate && ev.endDate !== ev.startDate;
+  const timeText = ev.allDay
+    ? `全天　${ev.startDate}${multi ? ' ~ ' + ev.endDate : ''}`
+    : `${ev.startDate} ${ev.time || ''}${multi ? ' ~ ' + ev.endDate : ''}`;
+  const updatedText = ev.updatedAt ? String(ev.updatedAt).slice(0, 16).replace('T', ' ') : '';
+  const row = (label, val) => val ? `<div class="calev-row"><span class="calev-k">${label}</span><span class="calev-v">${escapeHtml(val)}</span></div>` : '';
+  const followLabel = ev.remindAhead !== null && ev.remindAhead !== undefined
+    ? `跟随来源（提前 ${ev.remindAhead} 分钟）`
+    : `跟随全局默认（提前 ${defaultAhead} 分钟）`;
+  const aheadOpts = [0, 5, 15, 30, 60, 1440].map(m =>
+    `<option value="${m}"${Object.prototype.hasOwnProperty.call(per, 'aheadMin') && per.aheadMin === m ? ' selected' : ''}>提前 ${m} 分钟</option>`).join('');
+  const mask = document.createElement('div');
+  mask.className = 'calev-mask';
+  mask.innerHTML = `
+    <div class="calev-card" role="dialog" aria-modal="true">
+      <div class="calev-head">
+        <span class="calev-title">${escapeHtml(ev.title || '(无标题)')}${ev._cancelled ? '<span class="calsub-badge calsub-cancel-badge">已取消</span>' : ''}</span>
+        <button type="button" class="calev-close" title="关闭">×</button>
+      </div>
+      <div class="calev-rows">
+        ${row('来源', (ev._subName || (sub && sub.name) || '外部订阅') + (syncedAt ? `（同步于 ${syncedAt.slice(0, 16).replace('T', ' ')}）` : ''))}
+        ${row('时间', timeText)}
+        ${row('地点', ev.location || '')}
+        ${row('备注', ev.description || '')}
+        ${row('源更新时间', updatedText)}
+        ${row('来源标识', ev.uid || '')}
+      </div>
+      <div class="calev-remind">
+        <label class="calev-check"><input type="checkbox" class="calev-muted" ${per.muted ? 'checked' : ''} /> 关闭该事件的提醒</label>
+        <div class="calev-ahead-row">
+          <span class="calev-k">提前提醒</span>
+          <select class="calev-ahead" ${per.muted ? 'disabled' : ''}>
+            <option value=""${!Object.prototype.hasOwnProperty.call(per, 'aheadMin') ? ' selected' : ''}>${escapeHtml(followLabel)}</option>
+            ${aheadOpts}
+          </select>
+          <span class="calev-effective">${effectiveAhead === null ? '当前：已静音' : `当前生效：提前 ${effectiveAhead} 分钟`}</span>
+        </div>
+      </div>
+      <div class="calev-actions">
+        <button type="button" class="set-btn calev-save-task" ${ev._cancelled ? 'disabled' : ''}>存为本地事项</button>
+        <button type="button" class="set-btn calev-ok">关闭</button>
+      </div>
+      <div class="tool-hint calev-hint">外部事件只读保存于订阅缓存，不会自动变成本地事项；提醒与本地事项相互独立。</div>
+    </div>`;
+  document.body.appendChild(mask);
+  if (window.timetable) { try { window.timetable.setEditing(true); } catch { /* 忽略 */ } }
+  mask.addEventListener('click', (e) => { if (e.target === mask) closeCalEventDetail(); });
+  mask.querySelector('.calev-close').addEventListener('click', closeCalEventDetail);
+  mask.querySelector('.calev-ok').addEventListener('click', closeCalEventDetail);
+  const mutedCb = mask.querySelector('.calev-muted');
+  const aheadSel = mask.querySelector('.calev-ahead');
+  const effEl = mask.querySelector('.calev-effective');
+  const persistRemind = () => {
+    const cfg = loadCalEventCfg();
+    if (!cfg.events) cfg.events = {};
+    const cur = cfg.events[extKey] || {};
+    cur.muted = !!mutedCb.checked;
+    if (aheadSel.value === '') delete cur.aheadMin;
+    else cur.aheadMin = Number(aheadSel.value) || 0;
+    if (!cur.muted && !Object.prototype.hasOwnProperty.call(cur, 'aheadMin')) delete cfg.events[extKey];
+    else cfg.events[extKey] = cur;
+    saveCalEventCfg(cfg);
+    aheadSel.disabled = cur.muted;
+    const eff = extAheadMin(ev, cur, defaultAhead);
+    effEl.textContent = eff === null ? '当前：已静音' : `当前生效：提前 ${eff} 分钟`;
+  };
+  mutedCb.addEventListener('change', () => { persistRemind(); showToast(mutedCb.checked ? '已关闭该事件提醒' : '已开启该事件提醒'); });
+  aheadSel.addEventListener('change', () => { persistRemind(); showToast('该事件的提醒提前量已更新'); });
+  // 显式存为本地事项（与 .ics 导入同一去重口径；重复事件的单次出现只存当天一条）
+  const saveBtn = mask.querySelector('.calev-save-task');
+  saveBtn.addEventListener('click', () => {
+    const dup = loadEvents().some(e =>
+      (e.title || '') === (ev.title || '') && eventStart(e) === ev.startDate &&
+      (e.time || '') === (ev.time || '') && !(e.projectId || null));
+    if (dup) { showToast('本地已存在相同事项'); return; }
+    addEvent({
+      title: ev.title || '(无标题)',
+      startDate: ev.startDate,
+      endDate: ev.endDate || ev.startDate,
+      time: ev.allDay ? '' : (ev.time || ''),
+      category: ev.category || 'work',
+      urgency: 'normal',
+      projectId: null,
+      recur: (ev.id && String(ev.id).includes('@')) ? null : ev.recur,
+      tags: Array.isArray(ev.tags) ? ev.tags : [],
+      description: ev.description || ''
+    }, false);
+    saveBtn.disabled = true;
+    saveBtn.textContent = '已存为本地事项';
+    showToast('已添加为本地事项（外部订阅保留不变）');
+  });
 }
 
 // 按开始日期排序（无日期排最后），再按时间
@@ -4407,6 +4653,7 @@ function checkReminders() {
     playChime(CHIME.remind);
     showReminderToast(ev, aheadMin);
   }
+  checkExtReminders();   // P9.3：本地事项检查后追加外部订阅事件提醒（独立账本，互不影响）
 }
 
 // ---- 重复提醒（P7.3）：已提醒未处理的事项按设置间隔再次提醒 ----
@@ -4442,6 +4689,62 @@ function maybeReRemind(ev, key, now) {
   } catch { /* 通知不可用时仅响铃 */ }
   playChime(CHIME.remind);
   showReminderToast(ev, 0);
+}
+
+// ---- P9.3 外部事件提醒执行（账本去重；不触碰本地 Task 状态） ----
+function checkExtReminders() {
+  let dues = [];
+  try {
+    const now = new Date();
+    const subs = loadCalSubs().filter(s => s.enabled);
+    if (!subs.length) return;
+    const caches = {};
+    for (const s of subs) caches[s.id] = loadCalSubEvents(s.id);
+    const cfg = loadCalEventCfg();
+    if (cfg.defaultAheadMin === undefined) cfg.defaultAheadMin = Number(loadAppSettings().remindAheadDefault) || 0;
+    const ledger = loadCalRemindLedger();
+    dues = dueExtReminders(subs, caches, cfg, ledger, now);
+    if (!dues.length) return;
+    // 先入账本再响铃/通知：刷新订阅或应用重启都不会对同版本事件重复提醒
+    for (const d of dues) ledger[d.ledgerKey] = { v: d.version, ts: now.getTime() };
+    saveCalRemindLedger(ledger);
+    for (const d of dues) {
+      try {
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          const when = d.ev.allDay ? '全天' : (d.ev.time || '');
+          const n = new Notification('外部日历提醒', {
+            body: `「${d.sub.name}」${when} ${d.ev.title}${d.aheadMin > 0 ? `（提前 ${d.aheadMin} 分钟）` : ''}`
+          });
+          n.onclick = () => {
+            try { n.close(); } catch { /* 已关 */ }
+            focusWindow();
+            openCalEventDetail(extDetailProjection(d.sub, d.ev, d.occDate));
+          };
+        }
+      } catch { /* 通知不可用时仅响铃 */ }
+      playChime(CHIME.remind);
+      showExtReminderToast(d);
+    }
+  } catch { /* 外部提醒任何异常都不影响本地事项提醒 */ }
+}
+// 外部事件提醒条（只读：不提供完成/贪睡；详情可关闭单个事件提醒）
+function showExtReminderToast(d) {
+  if (loadAppSettings().reminderToastEnabled === false) return;
+  let t = document.querySelector('.toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.className = 'toast';
+    document.body.appendChild(t);
+  }
+  const when = d.ev.allDay ? '全天' : (d.ev.time || '');
+  const prefix = d.aheadMin > 0 ? `提前 ${d.aheadMin} 分钟 · 外部日历` : '外部日历到点提醒';
+  t.classList.remove('error');
+  t.innerHTML = `<span class="toast-msg">${prefix}：${escapeHtml(d.ev.title)}<span class="toast-sub">${escapeHtml(d.sub.name)} · ${escapeHtml(when)}</span></span><span class="toast-acts"><button class="extremind-detail" type="button">详情</button></span>`;
+  t.classList.add('show', 'toast-remind');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 8000);
+  const btn = t.querySelector('.extremind-detail');
+  if (btn) btn.addEventListener('click', () => { t.classList.remove('show'); openCalEventDetail(extDetailProjection(d.sub, d.ev, d.occDate)); });
 }
 
 // ============ iCal 互通（P4.3）：导出 .ics / 导入 .ics ============
@@ -8323,6 +8626,7 @@ function activateView(v) {
 function escClose() {
   const help = document.querySelector('.kbd-help-mask');
   if (help) { help.remove(); return 'help'; }
+  if (document.querySelector('.calev-mask')) { closeCalEventDetail(); return 'calev'; }   // P9.3 外部事件详情
   // 打开的表单：模拟点击其「取消」，完全复用现有关闭链（字段重置/语音停止/编辑态清除）
   const open = document.querySelector('.add-form:not(.hidden), .project-form:not(.hidden), .editor-block');
   if (open) {

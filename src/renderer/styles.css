@@ -2714,6 +2714,91 @@ html, body {
   border-color: rgba(250, 173, 20, 0.6) !important;
   color: #faad14 !important;
 }
+
+/* ===== P9.3 外部事件提醒 toast 副文案 ===== */
+.toast-msg .toast-sub {
+  display: block;
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 1px;
+}
+
+/* ===== P9.3 外部事件详情浮层 ===== */
+.calev-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 3100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.calev-card {
+  background: var(--card);
+  color: var(--txt);
+  border: 1px solid rgba(var(--txt-rgb), 0.12);
+  border-radius: 12px;
+  padding: 14px 16px;
+  width: min(440px, calc(100vw - 40px));
+  max-height: 82vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.calev-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.calev-title { display: flex; align-items: center; gap: 6px; flex: 1; flex-wrap: wrap; }
+.calev-close {
+  background: none;
+  border: none;
+  color: rgba(var(--txt-rgb), 0.6);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.calev-close:hover { color: var(--txt); }
+.calev-rows { margin-bottom: 10px; }
+.calev-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 12.5px;
+  border-top: 1px dashed rgba(var(--txt-rgb), 0.1);
+}
+.calev-row:first-child { border-top: none; }
+.calev-k {
+  flex: 0 0 64px;
+  color: rgba(var(--txt-rgb), 0.5);
+  font-size: 11.5px;
+  padding-top: 1px;
+}
+.calev-v { flex: 1; white-space: pre-wrap; word-break: break-word; }
+.calev-remind {
+  border: 1px solid rgba(var(--txt-rgb), 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+}
+.calev-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.calev-ahead-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.calev-ahead-row select { font-size: 12px; padding: 2px 4px; }
+.calev-effective { font-size: 11px; color: rgba(var(--txt-rgb), 0.5); }
+.calev-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.calev-hint { margin-top: 8px; }
 .calsub-badge {
   flex: 0 0 auto;
   font-size: 9px;
