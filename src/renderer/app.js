@@ -424,6 +424,20 @@ function filterByTag(list, tag) {
   return list.filter(ev => Array.isArray(ev.tags) && ev.tags.includes(tag));
 }
 
+// ============ 事项检查清单（P6.2）：子任务 ============
+// ev.checklist 为可选字段：[{ id, text, done }]，缺省 = 无子任务（旧数据零迁移）；
+// 子任务不级联完成主事项、不进统计、不支持嵌套；随事项 updatedAt 走 LWW 同步（不动 normTaskSnap 白名单）
+// 进度：无子任务返回 null；否则 { done, total }（事项行角标与表单共用口径）
+function checklistProgress(ev) {
+  const ck = ev && ev.checklist;
+  if (!Array.isArray(ck) || !ck.length) return null;
+  return { done: ck.filter(c => c && c.done).length, total: ck.length };
+}
+// 子任务 id：时间戳 + 随机（与事项 id 同风格）
+function mkCkId() {
+  return 'ck' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
 // ============ 公共构建器 ============
 // 事项条目（opts.showDate: 显示日期徽标 / opts.showProject: 显示项目徽标）
 function buildEventItem(ev, opts = {}) {
@@ -460,6 +474,11 @@ function buildEventItem(ev, opts = {}) {
     const p = ev.projectId ? getProject(ev.projectId) : null;
     if (p) badges += `<span class="event-project-badge">${escapeHtml(p.name)}</span>`;
     else badges += `<span class="event-project-badge project-none">未归类</span>`;
+  }
+  // 子任务进度角标（P6.2）：全部完成时绿色；点击打开编辑器定位子任务区
+  const ckProg = checklistProgress(ev);
+  if (ckProg) {
+    badges += `<span class="event-ck-badge${ckProg.done === ckProg.total ? ' all' : ''}" data-ck-id="${ev.id}" title="子任务 ${ckProg.done}/${ckProg.total}">▸${ckProg.done}/${ckProg.total}</span>`;
   }
 
   item.innerHTML = `
@@ -539,6 +558,11 @@ function buildTaskForm(opts = {}) {
     <div class="add-form-row-tags">标签
       <input type="text" class="ev-tags" title="标签，逗号分隔，最多 ${TAG_MAX} 个" placeholder="如：工作, 重要" value="${escapeHtml(preTags)}" />
     </div>
+    <div class="add-form-row-checklist">
+      <div class="ck-head">子任务</div>
+      <div class="ck-list"></div>
+      <input type="text" class="ck-input" placeholder="添加子任务，回车确认" maxlength="40" />
+    </div>
     <div class="add-form-row3">
       <button class="cancel">取消</button>
       <button class="save">${ev ? '完成编辑' : '保存'}</button>
@@ -583,6 +607,50 @@ function bindDateRangeSync(form) {
 
 // 绑定单个表单的保存/取消/回车
 function bindFormEvents(form) {
+  // ---- 子任务（P6.2）：表单闭包内维护 ckItems，保存时随 fields 写回 ----
+  const evForCk = form.dataset.editId ? loadEvents().find(x => x.id === form.dataset.editId) : null;
+  let ckItems = evForCk && Array.isArray(evForCk.checklist)
+    ? evForCk.checklist.map(c => ({ id: c.id || mkCkId(), text: String(c.text || ''), done: !!c.done }))
+    : [];
+  const ckListEl = form.querySelector('.ck-list');
+  const ckInputEl = form.querySelector('.ck-input');
+  const paintCk = () => {
+    if (!ckListEl) return;
+    ckListEl.innerHTML = ckItems.map(c => `
+      <div class="ck-item${c.done ? ' done' : ''}" data-id="${c.id}">
+        <span class="ck-check" title="${c.done ? '取消完成' : '标记完成'}"></span>
+        <span class="ck-text">${escapeHtml(c.text)}</span>
+        <span class="ck-del" title="删除子任务">×</span>
+      </div>`).join('');
+    ckListEl.querySelectorAll('.ck-item').forEach(row => {
+      const item = ckItems.find(c => c.id === row.dataset.id);
+      if (!item) return;
+      row.querySelector('.ck-check').addEventListener('click', (e) => {
+        e.stopPropagation();
+        item.done = !item.done;
+        paintCk();
+      });
+      row.querySelector('.ck-del').addEventListener('click', (e) => {
+        e.stopPropagation();
+        ckItems = ckItems.filter(c => c.id !== row.dataset.id);
+        paintCk();
+      });
+    });
+  };
+  if (ckInputEl) {
+    ckInputEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();   // 不触发标题行的回车保存
+      e.stopPropagation();
+      const text = ckInputEl.value.trim();
+      if (!text) return;
+      ckItems.push({ id: mkCkId(), text, done: false });
+      ckInputEl.value = '';
+      paintCk();
+    });
+  }
+  paintCk();
+
   // 语音输入订阅（关闭表单时统一取消，避免泄漏到下次创建的表单）
   let voiceUnsub = null, voiceStateUnsub = null, voiceErrUnsub = null;
   const cleanupVoice = () => {
@@ -622,6 +690,8 @@ function bindFormEvents(form) {
       : { freq: recurFreq, interval: 1, until: form.querySelector('.ev-recur-until').value || '' };
     // 标签（P3.3）：逗号分隔解析为去重数组；空串存 []
     fields.tags = parseTags(form.querySelector('.ev-tags').value);
+    // 子任务（P6.2）：新建表单为空时不写字段（保持"缺省=无子任务"）；编辑表单总是写回（支持删空）
+    if (ckItems.length || form.dataset.editId) fields.checklist = ckItems;
     if (form.dataset.editId) updateEvent(form.dataset.editId, fields);
     else addEvent(fields);
     closeForm(form);
@@ -656,6 +726,9 @@ function bindFormEvents(form) {
     if (recurUntil) recurUntil.value = '';
     const tagsEl = f.querySelector('.ev-tags');
     if (tagsEl) tagsEl.value = '';
+    ckItems = [];                 // 子任务一并重置（新建表单复用）
+    if (ckInputEl) ckInputEl.value = '';
+    paintCk();
     if (window.timetable) window.timetable.setEditing(false);
   };
 
@@ -774,6 +847,18 @@ function bindViewEvents() {
     del.addEventListener('click', (e) => {
       e.stopPropagation();
       deleteEvent(del.dataset.id);
+    });
+  });
+
+  // 子任务进度角标（P6.2）→ 打开编辑器并聚焦子任务输入框
+  weekList.querySelectorAll('.event-ck-badge').forEach(badge => {
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const real = loadEvents().find(x => x.id === badge.dataset.ckId);
+      if (!real) return;
+      openTaskEditor(real);
+      const ckInput = weekList.querySelector('.editor-block .ck-input');
+      if (ckInput) ckInput.focus();
     });
   });
 
@@ -2124,6 +2209,7 @@ function addEvent(fields, skipRender) {
     description: fields.description || '',
     recur: fields.recur || null,    // 重复规则（P3.2）：null = 不重复
     tags: Array.isArray(fields.tags) ? fields.tags : [],  // 标签（P3.3）
+    ...(Array.isArray(fields.checklist) && fields.checklist.length ? { checklist: fields.checklist } : {}),  // 子任务（P6.2）：空则不占字段
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -2143,7 +2229,7 @@ function updateEvent(id, fields) {
       ev.endDate = fields.endDate || fields.startDate;
       ev.date = fields.startDate;
     }
-    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur', 'tags']) {
+    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur', 'tags', 'checklist']) {
       if (fields[k] !== undefined) ev[k] = fields[k];
     }
     ev.updatedAt = new Date().toISOString();
