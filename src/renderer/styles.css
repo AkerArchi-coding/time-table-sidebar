@@ -1148,7 +1148,7 @@ html, body {
   gap: 10px;
   pointer-events: auto;
 }
-.toast-snooze {
+.toast-snooze, .toast-done {
   background: rgba(var(--accent-rgb), 0.3);
   border: 1px solid rgba(var(--accent-rgb), 0.6);
   color: #cfe4f7;
@@ -1158,7 +1158,8 @@ html, body {
   cursor: pointer;
   white-space: nowrap;
 }
-.toast-snooze:hover { background: rgba(var(--accent-rgb), 0.5); }
+.toast-snooze:hover, .toast-done:hover { background: rgba(var(--accent-rgb), 0.5); }
+.toast-acts { display: inline-flex; gap: 6px; }
 
 /* ============ 同步操作日志（项目视图底部） ============ */
 .sync-log {

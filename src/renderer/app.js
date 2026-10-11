@@ -3154,7 +3154,9 @@ const SYNC_LOG_LABELS = {
   'import-invalid': '文件无效',
   'import-cancel': '放弃合并',
   'merge': '合并完成',
-  'import-new': '导入新项目'
+  'import-new': '导入新项目',
+  'auto-sync': '自动同步',
+  'auto-sync-fail': '自动同步失败'
 };
 let syncLogExpanded = false;
 
@@ -3238,8 +3240,10 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
-// 事项提醒 toast：含「贪睡 5 分钟」按钮
+// 事项提醒 toast（P4.4 增强）：含「完成」「稍后 5 分钟」按钮与设置开关
 function showReminderToast(ev, aheadMin) {
+  // 应用内提醒条开关（P4.4）：关闭后到点仅保留系统通知与响铃
+  if (loadAppSettings().reminderToastEnabled === false) return;
   let t = document.querySelector('.toast');
   if (!t) {
     t = document.createElement('div');
@@ -3247,10 +3251,18 @@ function showReminderToast(ev, aheadMin) {
     document.body.appendChild(t);
   }
   const prefix = aheadMin > 0 ? `提前 ${aheadMin} 分钟提醒：` : '到点提醒：';
-  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><button class="toast-snooze" type="button">贪睡 5 分钟</button>`;
+  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><span class="toast-acts"><button class="toast-done" type="button">完成</button><button class="toast-snooze" type="button">稍后 5 分钟</button></span>`;
   t.classList.add('show', 'toast-remind');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
+  // 完成：直接置完成态（重复事项虚拟投影按日 override 由 toggleDone 内处理）
+  const doneBtn = t.querySelector('.toast-done');
+  if (doneBtn) {
+    doneBtn.addEventListener('click', () => {
+      t.classList.remove('show');
+      toggleDone(ev.id);
+    });
+  }
   const btn = t.querySelector('.toast-snooze');
   if (btn) {
     btn.addEventListener('click', () => {
@@ -4937,6 +4949,8 @@ function loadAppSettings() {
       voiceLanguage: 'zh-CN',      // 默认中文
       hotkeyToggleEnabled: true,   // 全局快捷键：Ctrl+Alt+T 唤出/收起（默认开）
       hotkeyQuickAddEnabled: false, // 全局快捷键：Ctrl+Alt+N 快速添加（默认关，避免打扰）
+      reminderToastEnabled: true,  // 应用内提醒条（P4.4，默认开；关闭后到点仅系统通知+响铃）
+      autoSyncEnabled: false,      // 定时自动同步（P4.4，默认关；10 分钟间隔，需配合对端在线）
       ...saved                     // 已有设置覆盖默认
     };
   } catch { return {}; }
@@ -4948,8 +4962,11 @@ function saveAppSettings(s) {
 // ---- 工具：设备同步（P3.4 局域网同步） ----
 // 面板状态（工具页内会话级；关闭工具页即放弃进行中的配对等待）
 let syncToolState = { pairing: null, scanning: false, found: [] };
+// 会话内同步面板是否打开过（P4.4 自动同步的前提：用户已知晓并启动过同步功能）
+let syncToolOpened = false;
 
 function buildSyncTool(panel) {
+  syncToolOpened = true;   // P4.4：打开过同步面板，本会话自动同步才生效
   const pairs = loadSyncPairs();
   const myId = getDeviceId();
   // 打开本页即开启同步服务监听（对端可发现并连接；空闲 5 分钟主进程自动关停）
@@ -5216,6 +5233,66 @@ async function doSyncNow(pair, ipInput) {
   showToast(`同步完成：事项 +${merged.stats.events.added}/更新 ${merged.stats.events.updated}/删除 ${merged.stats.events.deleted}`);
 }
 
+// ---- 定时自动同步（P4.4）：默认关；10 分钟固定间隔；全程静默（不弹 toast） ----
+// 生效前提 autoSyncEligible：开关开 + 会话内打开过同步面板（或在设置中开启）+ 窗口可见 + 有已配对设备
+const AUTO_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+function autoSyncEligible(settings, ctx) {
+  if (!settings || settings.autoSyncEnabled !== true) return false;
+  if (!ctx || !ctx.opened || ctx.paused) return false;
+  return Array.isArray(ctx.pairs) && ctx.pairs.length > 0;
+}
+let autoSyncRunning = false;    // 防重入：上一轮未完成时跳过本轮
+const autoSyncFailCount = {};   // deviceId → 连续失败次数（每满 3 次写一条日志后清零）
+// 单设备静默同步：复用 doSyncNow 的发现/合并/地址学习逻辑，去掉 UI 交互
+async function autoSyncDevice(pair) {
+  if (!window.timetable || !window.timetable.syncSend) return;
+  // 发现对端：UDP 扫描 → lastIp 兜底（端口需发现获得，兜底通常失败，静默跳过）
+  let ip = '', port = 0;
+  try {
+    const found = await window.timetable.syncPairScan();
+    const hit = (found || []).find(f => f.device && f.device.deviceId === pair.deviceId);
+    if (hit) { ip = hit.ip; port = hit.port; }
+    else if (pair.lastIp) { ip = pair.lastIp; }
+  } catch { return; }
+  if (!ip || !port) return;
+  try {
+    const res = await window.timetable.syncSend({ ip, port, peerDeviceId: pair.deviceId, snapshot: buildSyncSnapshot() });
+    if (!res || !res.ok) throw new Error(syncErrText(res && res.error));
+    const merged = mergeSyncData(buildSyncSnapshot(), res.data || {});
+    applyMergedData(merged, pair.name);
+    // 地址学习：成功地址写回设备记录，下次免搜索
+    if (ip !== pair.lastIp) {
+      const list = loadSyncPairs();
+      const cur = list.find(x => x.deviceId === pair.deviceId);
+      if (cur) { cur.lastIp = ip; saveSyncPairs(list); }
+    }
+    autoSyncFailCount[pair.deviceId] = 0;
+    // 有实际变更才写日志（无变化不记，避免 10 分钟一条刷掉导入导出记录）
+    if (merged.stats && merged.stats.events && (merged.stats.events.added + merged.stats.events.updated + merged.stats.events.deleted) > 0) {
+      addSyncLog('auto-sync', { pname: pair.name || '', detail: `事项 +${merged.stats.events.added}/更新 ${merged.stats.events.updated}/删除 ${merged.stats.events.deleted}` });
+    }
+  } catch (e) {
+    // 失败静默：连续满 3 次写一条日志提示，随后清零重新计数
+    const n = (autoSyncFailCount[pair.deviceId] || 0) + 1;
+    if (n >= 3) {
+      autoSyncFailCount[pair.deviceId] = 0;
+      addSyncLog('auto-sync-fail', { pname: pair.name || '', detail: String((e && e.message) || e) });
+    } else {
+      autoSyncFailCount[pair.deviceId] = n;
+    }
+  }
+}
+// 调度 tick：窗口隐藏时暂停（windowVisible 由 onWindowVisible 维护），防止后台空转
+async function autoSyncTick() {
+  if (autoSyncRunning) return;
+  const pairs = loadSyncPairs();
+  if (!autoSyncEligible(loadAppSettings(), { opened: syncToolOpened, paused: !windowVisible, pairs })) return;
+  autoSyncRunning = true;
+  try {
+    for (const pair of pairs) { await autoSyncDevice(pair); }
+  } finally { autoSyncRunning = false; }
+}
+
 // 服务侧：被对端连接时，主进程把对端快照转来 → 本地合并 → 回包本地（合并后）快照
 // 结果：双向收敛到同一份数据（两端各执行一次同规则合并）
 if (window.timetable && window.timetable.onSyncExchangeRequest) {
@@ -5337,6 +5414,13 @@ function buildSettings(panel) {
       </label>
       <label class="set-row">
         <span class="set-text">
+          <span class="set-name">应用内提醒条</span>
+          <span class="set-desc">到点提醒时侧边栏底部显示提醒条（含完成/稍后按钮）；关闭后仅系统通知</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-remind-toast"><span class="set-slider"></span></span>
+      </label>
+      <label class="set-row">
+        <span class="set-text">
           <span class="set-name">快捷键唤出侧边栏</span>
           <span class="set-desc">Ctrl+Alt+T 唤出/收起，任何应用前台时全局生效</span>
         </span>
@@ -5417,6 +5501,13 @@ function buildSettings(panel) {
         </span>
         <button type="button" class="set-btn" id="syncPairBtn">打开设备同步</button>
       </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">自动同步</span>
+          <span class="set-desc">每 10 分钟与已配对设备静默同步（窗口隐藏时暂停；需本会话打开过设备同步页）</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-autosync-input"><span class="set-slider"></span></span>
+      </div>
     </div>
     <div class="set-about" id="setAbout">日程侧边栏<br>所有数据仅保存在本机</div>
   `;
@@ -5444,6 +5535,18 @@ function buildSettings(panel) {
     weekList.querySelectorAll('.ev-voice-btn').forEach(btn => { btn.hidden = !voiceSwitch.checked; });
     showToast(voiceSwitch.checked ? '语音输入已开启（仅 Windows 内置识别）' : '语音输入已关闭');
   });
+
+  // 应用内提醒条开关（默认开；关闭后到点仅系统通知 + 响铃）
+  const remindToastSwitch = panel.querySelector('.set-remind-toast');
+  if (remindToastSwitch) {
+    remindToastSwitch.checked = st.reminderToastEnabled !== false;
+    remindToastSwitch.addEventListener('change', () => {
+      const s = loadAppSettings();
+      s.reminderToastEnabled = remindToastSwitch.checked;
+      saveAppSettings(s);
+      showToast(remindToastSwitch.checked ? '应用内提醒条已开启' : '应用内提醒条已关闭（保留系统通知）');
+    });
+  }
 
   // 全局快捷键开关（注册失败时主进程降级并回传实际生效状态，这里据此修正 UI 与存储）
   const hkToggle = panel.querySelector('.set-hotkey-toggle');
@@ -5736,6 +5839,19 @@ function buildSettings(panel) {
   const syncPairBtn = panel.querySelector('#syncPairBtn');
   if (syncPairBtn) {
     syncPairBtn.addEventListener('click', () => openTool('sync'));
+  }
+
+  // 自动同步开关（默认关；开启视为已知晓同步功能，本会话自动同步即生效）
+  const autosyncSwitch = panel.querySelector('.set-autosync-input');
+  if (autosyncSwitch) {
+    autosyncSwitch.checked = st.autoSyncEnabled === true;
+    autosyncSwitch.addEventListener('change', () => {
+      const s = loadAppSettings();
+      s.autoSyncEnabled = autosyncSwitch.checked;
+      saveAppSettings(s);
+      if (autosyncSwitch.checked) syncToolOpened = true;
+      showToast(autosyncSwitch.checked ? '自动同步已开启（每 10 分钟）' : '自动同步已关闭');
+    });
   }
 }
 
@@ -6140,6 +6256,8 @@ setInterval(renderClock, 30 * 1000);
 
 // 事项到点提醒：15 秒轮询（同一分钟内 4 次机会命中 HH:MM 等值判定）
 setInterval(checkReminders, 15 * 1000);
+// 定时自动同步（P4.4）：10 分钟固定间隔，开关默认关；tick 内部校验生效前提
+setInterval(autoSyncTick, AUTO_SYNC_INTERVAL_MS);
 // 通知权限：启动即申请（到点提醒 / 番茄钟通知用）
 if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
   try { Notification.requestPermission(); } catch { /* 忽略 */ }
