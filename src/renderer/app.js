@@ -947,7 +947,8 @@ function bindFormEvents(form) {
   form.querySelector('.cancel').addEventListener('click', () => closeForm(form));
   form.querySelector('.ev-title').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') save();
-    if (e.key === 'Escape') closeForm(form);
+    // P7.4：stopPropagation 防止 Esc 同时触达全局快捷键（一次只关一层）
+    if (e.key === 'Escape') { e.stopPropagation(); closeForm(form); }
   });
 }
 
@@ -1095,7 +1096,8 @@ function bindViewEvents() {
     form.querySelector('.cancel').addEventListener('click', () => closeProjectForm(form));
     form.querySelector('.pj-name').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSave();
-      if (e.key === 'Escape') closeProjectForm(form);
+      // P7.4：stopPropagation 防止 Esc 同时触达全局快捷键（一次只关一层）
+      if (e.key === 'Escape') { e.stopPropagation(); closeProjectForm(form); }
     });
   });
 }
@@ -5931,6 +5933,7 @@ function buildClipboard(panel) {
       searchX.style.display = 'none';
       renderClipboardPanel();
       e.preventDefault();
+      e.stopPropagation();   // P7.4：仅清空搜索词，不连工具面板一起关
     }
   });
   searchX.addEventListener('click', () => {
@@ -7465,16 +7468,106 @@ viewTabs.querySelectorAll('button').forEach(btn => {
 });
 
 // ============ 范围导航（滚动轮换，仅日历视图；月历模式翻月） ============
-$('prevWeek').addEventListener('click', () => {
-  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() - 1, 1); monthExpandKey = ''; render(); return; }
-  rangeStart = addDays(rangeStart, -PAGE_STEP);
+// P7.4：抽为 navPeriod(dir) 供 ←/→ 快捷键复用（dir -1=上一周期 / 1=下一周期）
+function navPeriod(dir) {
+  if (calendarMode === 'month') {
+    monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + dir, 1);
+    monthExpandKey = '';
+    render(); return;
+  }
+  rangeStart = addDays(rangeStart, dir * PAGE_STEP);
   render();
-});
-$('nextWeek').addEventListener('click', () => {
-  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 1); monthExpandKey = ''; render(); return; }
-  rangeStart = addDays(rangeStart, PAGE_STEP);
-  render();
-});
+}
+$('prevWeek').addEventListener('click', () => navPeriod(-1));
+$('nextWeek').addEventListener('click', () => navPeriod(1));
+
+// ============ 应用内键盘快捷键与帮助浮层（P7.4） ============
+// 纯函数：目标元素是否可编辑（输入中不触发单键快捷键）
+function isEditableTarget(el) {
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || !!el.isContentEditable;
+}
+// 纯函数：键盘事件 → 应用动作（'' = 不处理）。修饰键仅放行 Ctrl+F；输入法组字中不处理
+function kbdActionOf(e) {
+  if (!e || e.isComposing) return '';
+  if (e.altKey || e.metaKey) return '';
+  if (e.ctrlKey) return (e.key === 'f' || e.key === 'F') ? 'search' : '';
+  switch (e.key) {
+    case 'n': case 'N': return 'quickadd';
+    case '1': return 'view1';
+    case '2': return 'view2';
+    case '3': return 'view3';
+    case '4': return 'view4';
+    case 'ArrowLeft': return 'prev';
+    case 'ArrowRight': return 'next';
+    case 'Escape': return 'esc';
+    case '?': return 'help';
+    default: return '';
+  }
+}
+// 工具打开时切视图：先收工具面板再切换（对齐「‹ 返回」的 closeTool + render 语义）
+function activateView(v) {
+  if (currentTool) { closeTool(); render(); }
+  switchView(v);
+}
+// Esc 逐层关闭：帮助浮层 > 编辑表单 > 工具面板 > 弹出菜单；返回实际关闭层（''=无事发生）
+function escClose() {
+  const help = document.querySelector('.kbd-help-mask');
+  if (help) { help.remove(); return 'help'; }
+  // 打开的表单：模拟点击其「取消」，完全复用现有关闭链（字段重置/语音停止/编辑态清除）
+  const open = document.querySelector('.add-form:not(.hidden), .project-form:not(.hidden), .editor-block');
+  if (open) {
+    const form = open.classList.contains('editor-block') ? (open.querySelector('.add-form') || open) : open;
+    const cancel = form.querySelector('.cancel');
+    if (cancel) { cancel.click(); return 'form'; }
+  }
+  if (currentTool) { closeTool(); render(); return 'tool'; }
+  if (!ctxMenu.classList.contains('hidden')) { hideCtxMenu(); return 'menu'; }
+  return '';
+}
+// 快捷键帮助浮层：开 ⇄ 关
+function toggleKbdHelp() {
+  const exist = document.querySelector('.kbd-help-mask');
+  if (exist) { exist.remove(); return; }
+  const mask = document.createElement('div');
+  mask.className = 'kbd-help-mask';
+  const group = (title, rows) => `<div class="kbd-help-group"><div class="kbd-help-title">${title}</div>${rows.map(r => `<div class="kbd-help-row"><span class="kbd-keys">${r[0]}</span><span class="kbd-desc">${r[1]}</span></div>`).join('')}</div>`;
+  mask.innerHTML = `
+    <div class="kbd-help-card">
+      <div class="kbd-help-head">键盘快捷键<button class="kbd-help-close" type="button">×</button></div>
+      ${group('视图', [['1 / 2 / 3 / 4', '今日 / 项目 / 事项 / 日历'], ['← / →', '日历上一 / 下一周期'], ['Esc', '逐层关闭（表单 > 工具 > 菜单）']])}
+      ${group('事项', [['N', '快速新建事项'], ['Ctrl+F', '搜索事项']])}
+      ${group('通用', [['?', '打开 / 关闭本帮助']])}
+    </div>`;
+  mask.addEventListener('click', (e) => { if (e.target === mask) mask.remove(); });
+  const closeBtn = mask.querySelector('.kbd-help-close');
+  if (closeBtn) closeBtn.addEventListener('click', () => mask.remove());
+  document.body.appendChild(mask);
+}
+// 全局 keydown（冒泡阶段）：表单/剪贴板搜索内的 Escape 已在元素层 stopPropagation，一次只关一层；
+// Esc 分支不做可编辑目标过滤——输入框内按 Esc 也应关闭所处层级（快速添加/搜索面板等）
+function onAppKey(e) {
+  const act = kbdActionOf(e);
+  if (!act) return;
+  if (act === 'esc') {
+    if (escClose()) e.preventDefault();
+    return;
+  }
+  if (isEditableTarget(e.target)) return;   // 输入/选择中不触发其余快捷键
+  switch (act) {
+    case 'search': openTool('search'); break;            // 面板自聚焦输入框
+    case 'quickadd': openTool('quickadd'); break;
+    case 'view1': activateView('today'); break;
+    case 'view2': activateView('projects'); break;
+    case 'view3': activateView('tasks'); break;
+    case 'view4': activateView('calendar'); break;
+    case 'prev': if (currentView === 'calendar' && !currentTool) navPeriod(-1); break;
+    case 'next': if (currentView === 'calendar' && !currentTool) navPeriod(1); break;
+    case 'help': toggleKbdHelp(); break;
+  }
+}
+document.addEventListener('keydown', onAppKey);
 
 // 收起态点击窄条：乐观切 CSS 类 + 通知主进程立即展开窗口（绕过边缘停留判定）
 function ensureExpanded() {

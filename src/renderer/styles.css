@@ -2657,3 +2657,71 @@ html, body {
     .stat-cmp.up { color: #6fbf73; font-size: 11px; }
     .stat-cmp.down { color: var(--danger); font-size: 11px; }
     .stat-cmp-na { font-size: 11px; color: rgba(var(--txt-rgb), 0.4); }
+
+/* ===== P7.4 键盘快捷键帮助浮层 ===== */
+.kbd-help-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.kbd-help-card {
+  background: var(--card);
+  color: var(--txt);
+  border: 1px solid rgba(var(--txt-rgb), 0.12);
+  border-radius: 12px;
+  padding: 14px 16px;
+  width: min(300px, calc(100vw - 40px));
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.kbd-help-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13.5px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.kbd-help-close {
+  background: none;
+  border: none;
+  color: rgba(var(--txt-rgb), 0.6);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.kbd-help-close:hover { color: var(--txt); }
+.kbd-help-group { margin-bottom: 10px; }
+.kbd-help-title {
+  font-size: 10.5px;
+  color: rgba(var(--txt-rgb), 0.5);
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+.kbd-help-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.kbd-keys {
+  flex: none;
+  min-width: 84px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--accent-txt);
+  background: rgba(var(--accent-rgb), 0.14);
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  border-radius: 4px;
+  padding: 1px 6px;
+  text-align: center;
+  white-space: nowrap;
+}
+.kbd-desc { color: rgba(var(--txt-rgb), 0.85); }
