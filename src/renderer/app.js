@@ -3888,10 +3888,58 @@ function quickInputPreview(parsed) {
   return '→ ' + parts.join(' ');
 }
 
+// ============ 事项模板（P5.3） ============
+// localStorage: eventTemplates = [{id, title, time, category, urgency, recur, tags, description, createdAt}]
+// 日期不入模板（应用时默认今天）；仅进三档备份（backup.js BUSINESS_KEYS），不进局域网同步快照
+function loadEventTemplates() {
+  try {
+    const arr = JSON.parse(localStorage.getItem('eventTemplates') || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function saveEventTemplates(arr) {
+  localStorage.setItem('eventTemplates', JSON.stringify(arr));
+}
+// 事项存为模板：同 title+time 视为重复（跳过）；返回 'saved' | 'dup'
+function saveEventAsTemplate(ev) {
+  const list = loadEventTemplates();
+  const t = String(ev.title || '');
+  const tm = String(ev.time || '');
+  if (list.some(x => x.title === t && String(x.time || '') === tm)) return 'dup';
+  list.unshift({
+    id: 'tpl-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    title: t, time: tm,
+    category: ev.category || 'work',
+    urgency: ev.urgency || 'normal',
+    recur: ev.recur || null,
+    tags: Array.isArray(ev.tags) ? ev.tags.slice() : [],
+    description: String(ev.description || ''),
+    createdAt: new Date().toISOString()
+  });
+  saveEventTemplates(list);
+  return 'saved';
+}
+function deleteEventTemplate(id) {
+  saveEventTemplates(loadEventTemplates().filter(t => t.id !== id));
+}
+// 快速添加面板的模板 chips 行 HTML：空模板返回 ''（整行隐藏）；默认最多 8 个 + 「…」展开
+let qaTplExpanded = false;   // chips 是否已展开（面板重绘间保持）
+function tplChipsHtml() {
+  const list = loadEventTemplates();
+  if (!list.length) return '';
+  const shown = qaTplExpanded ? list : list.slice(0, 8);
+  const chips = shown.map(t =>
+    `<button type="button" class="qa-chip" data-tpl="${t.id}" title="${escapeHtml(t.title)}${t.time ? ' ' + t.time : ''}">${escapeHtml(t.title)}</button>`
+  ).join('');
+  const more = (list.length > 8 && !qaTplExpanded) ? '<button type="button" class="qa-chip" data-tpl-more="1">…</button>' : '';
+  return `<div class="qa-tpl-row">${chips}${more}</div>`;
+}
+
 function buildQuickAdd(panel) {
   const tk = dateKey(today());
   panel.innerHTML = `
     <div class="tool-hint">回车快速保存，可连续添加；默认归属今天</div>
+    <div class="qa-tpl-holder"></div>
     <input type="text" class="qa-input" maxlength="60" placeholder="要做点什么？（支持「明天下午3点半」等写法）" />
     <div class="qa-hint" hidden></div>
     <div class="qa-row">
@@ -3935,6 +3983,37 @@ function buildQuickAdd(panel) {
     }
   };
   titleEl.addEventListener('input', applyParse);
+
+  // 模板 chips（P5.3）：点击预填整表单（标题/时间/分类/紧急度），右键删除该模板；
+  // 只重绘 holder 容器，不重建面板（避免清掉正在输入的标题）
+  const tplHolder = panel.querySelector('.qa-tpl-holder');
+  const bindChips = () => {
+    tplHolder.querySelectorAll('.qa-chip[data-tpl]').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const t = loadEventTemplates().find(x => x.id === chip.dataset.tpl);
+        if (!t) return;
+        titleEl.value = t.title;
+        timeEl.value = t.time || '';
+        catEl.value = t.category || 'work';
+        urgEl.value = t.urgency || 'normal';
+        lastApplied = '';          // 模板应用视为手动状态，后续输入按解析差异回填
+        titleEl.focus();
+      });
+      chip.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const t = loadEventTemplates().find(x => x.id === chip.dataset.tpl);
+        if (!t) return;
+        if (confirm(`删除模板「${t.title}」？`)) {
+          deleteEventTemplate(t.id);
+          paintChips();
+        }
+      });
+    });
+    const moreBtn = tplHolder.querySelector('[data-tpl-more]');
+    if (moreBtn) moreBtn.addEventListener('click', () => { qaTplExpanded = true; paintChips(); });
+  };
+  const paintChips = () => { tplHolder.innerHTML = tplChipsHtml(); bindChips(); };
+  paintChips();
 
   const doSave = () => {
     const t = titleEl.value.trim();
@@ -6287,6 +6366,7 @@ function showEventMenu(x, y, eventId) {
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-action="move">将完成时间调整到</div>
     <div class="ctx-item" data-action="toProject">调整事项到项目</div>
+    <div class="ctx-item" data-action="toTemplate">存为模板</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item danger" data-action="delete">删除</div>
   `;
@@ -6304,6 +6384,10 @@ function showEventMenu(x, y, eventId) {
     toProject: () => openProjectPicker('调整到哪个项目', ev.projectId, (pid) => {
       moveEventToProject(templateId, pid);
     }),
+    toTemplate: () => {
+      const r = saveEventAsTemplate(ev);
+      showToast(r === 'dup' ? '模板已存在（同标题同时间）' : '已存为模板：' + ev.title);
+    },
     delete: () => {
       // 重复系列删除影响所有未来日程，删除前确认一次
       if (isVirtual && !confirm(`「${ev.title}」是重复事项，删除将移除全部重复日程，确定？`)) return;

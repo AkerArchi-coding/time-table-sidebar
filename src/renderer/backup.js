@@ -17,7 +17,8 @@ const BACKUP_SCHEMA_VERSION = 1;
 
 // localStorage key 分类
 const SETTINGS_KEYS = ['appSettings', 'pomoCfg', 'daySort', 'uiTheme'];
-const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'recurDone', 'deviceId', 'syncPairs', 'syncTombstones'];
+// eventTemplates（P5.3 事项模板）只进三档备份；不进局域网同步快照，避免为此改动 mergeSyncData 引入风险
+const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'recurDone', 'deviceId', 'syncPairs', 'syncTombstones', 'eventTemplates'];
 const STATE_KEYS = ['remindedKeys', 'weatherCity', 'pomoStats'];   // 运行时状态，可一并备份但导入时不强制覆盖
 
 function safeGet(key) {

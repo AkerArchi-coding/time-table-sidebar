@@ -1376,6 +1376,28 @@ html, body {
   padding: 0 2px;
   min-height: 0;
 }
+/* 模板 chips 行（P5.3）：空模板整行不渲染 */
+.qa-tpl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.qa-chip {
+  border: none;
+  border-radius: 10px;
+  padding: 3px 8px;
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent-txt);
+  font-size: 11px;
+  line-height: 1.2;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s;
+}
+.qa-chip:hover { background: rgba(var(--accent-rgb), 0.35); color: var(--txt); }
 .qa-row { display: flex; gap: 6px; }
 .qa-row > * { flex: 1; min-width: 0; }
 .qa-actions { display: flex; gap: 6px; }
