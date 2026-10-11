@@ -503,6 +503,15 @@ html, body {
   background: rgba(var(--txt-rgb), 0.08);
   color: rgba(var(--txt-rgb), 0.45);
 }
+/* 阶段徽标（P8.1）：与项目徽标同色系，略浅 */
+.event-phase-badge {
+  background: rgba(114, 46, 209, 0.20);
+  color: #9254de;
+  max-width: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* 今日/日历日期卡内：项目徽标改为窄块自动换行（最多两行），不再单行占宽 */
 .day-card .event-project-badge {
   display: -webkit-box;
@@ -2750,3 +2759,105 @@ html, body {
   color: rgba(var(--txt-rgb), 0.5);
 }
 .hm-legend .hm-cell { width: 10px; height: 10px; }
+
+/* ============ P8.1 项目阶段管理区块 ============ */
+.phase-block {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: rgba(var(--txt-rgb), 0.03);
+  border-radius: 6px;
+}
+.phase-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.phase-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(var(--txt-rgb), 0.75);
+}
+.phase-add-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.4);
+  background: transparent;
+  color: var(--accent-txt);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.phase-add-btn:hover { background: rgba(var(--accent-rgb), 0.15); }
+.phase-list { display: flex; flex-direction: column; gap: 3px; }
+.phase-empty {
+  font-size: 11px;
+  color: rgba(var(--txt-rgb), 0.4);
+  padding: 4px 0;
+}
+.phase-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(var(--txt-rgb), 0.04);
+}
+.phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.phase-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--txt);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.phase-name[contenteditable="true"] {
+  outline: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 3px;
+  background: rgba(var(--card-rgb, 42, 44, 54), 0.8);
+}
+.phase-count {
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.5);
+  flex: 0 0 auto;
+}
+.phase-ops { display: flex; gap: 2px; flex: 0 0 auto; }
+.phase-ops button {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: rgba(var(--txt-rgb), 0.5);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+.phase-ops button:hover:not(:disabled) {
+  background: rgba(var(--txt-rgb), 0.1);
+  color: var(--txt);
+}
+.phase-ops button:disabled { opacity: 0.3; cursor: default; }
+.phase-del:hover:not(:disabled) { color: #f5222d !important; }
+
+/* 甘特图事项条内阶段小标签 */
+.gantt-phase-tag {
+  display: inline-block;
+  font-size: 9px;
+  padding: 0 4px;
+  margin-right: 3px;
+  border-radius: 2px;
+  background: rgba(114, 46, 209, 0.35);
+  color: #d3adf7;
+  white-space: nowrap;
+  max-width: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}

@@ -143,6 +143,8 @@ function loadEvents() {
       if (ev.recur === undefined) ev.recur = null;
       // 标签（P3.3）：字符串数组，用于今日/事项视图筛选
       if (!Array.isArray(ev.tags)) ev.tags = [];
+      // 阶段（P8.1）：事项所属项目阶段 id，空字符串表示未分阶段
+      if (ev.phaseId === undefined) ev.phaseId = '';
     }
     eventsCache = list;
     return list;
@@ -450,6 +452,8 @@ function loadProjects() {
       if (p.category === undefined) p.category = 'work';
       if (p.revision === undefined) p.revision = 1;                 // 同步版本号（导出/修改递增）
       if (p.updatedAt === undefined) p.updatedAt = p.createdAt || '';
+      // 阶段（P8.1）：项目下的阶段列表，[{id, name, order}]
+      if (!Array.isArray(p.phases)) p.phases = [];
       if (p.startDate && p.endDate && p.endDate < p.startDate) {
         const t = p.startDate; p.startDate = p.endDate; p.endDate = t;
       }
@@ -498,6 +502,16 @@ function projectOptionsHtml(selectedId) {
     html += `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`;
   }
   return html;
+}
+
+// 项目阶段下拉选项 HTML（P8.1）：无项目时返回空串（调用方自行处理）
+function phaseOptionsHtml(projectId, selectedId) {
+  if (!projectId) return '';
+  const p = getProject(projectId);
+  if (!p || !Array.isArray(p.phases) || p.phases.length === 0) return '';
+  return p.phases.map(ph =>
+    `<option value="${ph.id}" ${ph.id === selectedId ? 'selected' : ''}>${escapeHtml(ph.name)}</option>`
+  ).join('');
 }
 
 // ============ 时钟 ============
@@ -637,6 +651,12 @@ function buildEventItem(ev, opts = {}) {
     if (p) badges += `<span class="event-project-badge">${escapeHtml(p.name)}</span>`;
     else badges += `<span class="event-project-badge project-none">未归类</span>`;
   }
+  // 阶段标签（P8.1）：有 phaseId 且能找到阶段时显示
+  if (ev.phaseId && ev.projectId) {
+    const p = getProject(ev.projectId);
+    const ph = p && Array.isArray(p.phases) ? p.phases.find(x => x.id === ev.phaseId) : null;
+    if (ph) badges += `<span class="event-phase-badge" title="阶段：${escapeHtml(ph.name)}">${escapeHtml(ph.name)}</span>`;
+  }
   // 子任务进度角标（P6.2）：全部完成时绿色；点击打开编辑器定位子任务区
   const ckProg = checklistProgress(ev);
   if (ckProg) {
@@ -666,6 +686,8 @@ function buildTaskForm(opts = {}) {
   const preCategory = ev ? (ev.category || 'work') : 'work';
   const preUrgency = ev ? (ev.urgency || 'normal') : 'normal';
   const preProject = ev ? (ev.projectId || '') : '';
+  // 阶段初值（P8.1）：编辑取事项现值；新建为空
+  const prePhase = ev ? (ev.phaseId || '') : '';
   // 提前提醒初值：编辑取事项现值；新建取全局默认提前量（P7.3）
   const preRemind = ev ? (ev.remindAhead || 0) : (loadAppSettings().remindAheadDefault || 0);
   const preRecurFreq = ev && ev.recur && RECUR_FREQ_LABELS[ev.recur.freq] ? ev.recur.freq : 'none';
@@ -698,6 +720,10 @@ function buildTaskForm(opts = {}) {
         <option value="loose"${sel('loose', preUrgency)}>松散</option>
       </select>
       ${opts.fixedProject ? '' : `<select class="ev-project" title="所属项目">${projectOptionsHtml(preProject)}</select>`}
+      <select class="ev-phase" title="所属阶段" data-phase-pid="${opts.fixedProject || preProject || ''}">
+        <option value="">未分阶段</option>
+        ${phaseOptionsHtml(opts.fixedProject || preProject, prePhase)}
+      </select>
     </div>
     <div class="add-form-row-date">
       <input type="date" class="ev-start" title="开始日期（可留空=无日期）" value="${preStart}" />
@@ -836,6 +862,9 @@ function bindFormEvents(form) {
     if (start && end && end < start) end = start;
     // 项目：优先固定项目，否则读下拉
     const projectId = form.dataset.fixedProject || (form.querySelector('.ev-project') ? form.querySelector('.ev-project').value : '') || null;
+    // 阶段（P8.1）：读阶段下拉，若无项目则置空
+    const phaseEl = form.querySelector('.ev-phase');
+    const phaseId = projectId && phaseEl ? phaseEl.value : '';
     const fields = {
       date: start,                 // date 始终与 startDate 同步，兼容旧逻辑
       startDate: start,
@@ -844,6 +873,7 @@ function bindFormEvents(form) {
       category: category || 'work',
       urgency: urgency || 'normal',
       projectId,
+      phaseId,
       remindAhead: Number(form.querySelector('.ev-remind').value) || 0
     };
     // 重复规则：不重复存 null；有规则时必须以开始日期为锚（无开始日期的规则不投影）
@@ -939,6 +969,15 @@ function bindFormEvents(form) {
     });
   }
 
+  // ---- 项目选择变化时刷新阶段下拉（P8.1） ----
+  const projectSel = form.querySelector('.ev-project');
+  const phaseSel = form.querySelector('.ev-phase');
+  if (projectSel && phaseSel) {
+    projectSel.addEventListener('change', () => {
+      const pid = projectSel.value;
+      phaseSel.innerHTML = '<option value="">未分阶段</option>' + phaseOptionsHtml(pid, '');
+    });
+  }
 
   form.querySelector('.save').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1776,6 +1815,9 @@ function buildProjectInline(p) {
   info.appendChild(buildProjectForm());
   box.appendChild(info);
 
+  // 阶段管理区块（P8.1）
+  box.appendChild(buildPhaseBlock(p));
+
   // 列表 / 甘特图 子切换（每个项目各自记忆模式）
   const subTabs = document.createElement('div');
   subTabs.className = 'sub-tabs';
@@ -1814,6 +1856,86 @@ function buildProjectInline(p) {
   }
 
   return box;
+}
+
+// ============ 项目阶段管理区块（P8.1） ============
+function buildPhaseBlock(p) {
+  const phases = Array.isArray(p.phases) ? p.phases : [];
+  const tasks = getProjectTasks(p.id);
+  const block = document.createElement('div');
+  block.className = 'phase-block';
+  block.innerHTML = `
+    <div class="phase-head">
+      <span class="phase-title">阶段</span>
+      <button class="phase-add-btn" title="添加阶段">+ 添加阶段</button>
+    </div>
+    <div class="phase-list">
+      ${phases.length === 0 ? '<div class="phase-empty">暂无阶段，可将事项归入不同阶段</div>' : phases.map((ph, i) => {
+        const cnt = tasks.filter(t => t.phaseId === ph.id).length;
+        return `<div class="phase-item" data-phid="${ph.id}">
+          <span class="phase-dot" style="background:${phaseColor(i)}"></span>
+          <span class="phase-name" contenteditable="false" title="点击重命名">${escapeHtml(ph.name)}</span>
+          <span class="phase-count">${cnt} 事项</span>
+          <div class="phase-ops">
+            <button class="phase-up" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button class="phase-down" title="下移" ${i === phases.length - 1 ? 'disabled' : ''}>↓</button>
+            <button class="phase-del" title="删除阶段">✕</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+
+  // 添加阶段
+  block.querySelector('.phase-add-btn').addEventListener('click', () => {
+    const name = prompt('输入阶段名称：', '新阶段');
+    if (name === null) return;
+    addPhase(p.id, name);
+    render();
+  });
+
+  // 阶段列表操作
+  block.querySelectorAll('.phase-item').forEach(item => {
+    const phid = item.dataset.phid;
+    const nameEl = item.querySelector('.phase-name');
+    // 点击名称进入编辑
+    nameEl.addEventListener('click', () => {
+      nameEl.setAttribute('contenteditable', 'true');
+      nameEl.focus();
+      // 全选文本
+      const range = document.createRange();
+      range.selectNodeContents(nameEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    nameEl.addEventListener('blur', () => {
+      nameEl.setAttribute('contenteditable', 'false');
+      const newName = nameEl.textContent.trim();
+      if (newName) { renamePhase(p.id, phid, newName); render(); }
+      else { nameEl.textContent = (p.phases.find(x => x.id === phid) || {}).name || ''; }
+    });
+    nameEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
+      if (e.key === 'Escape') { nameEl.blur(); }
+    });
+    item.querySelector('.phase-up').addEventListener('click', () => { movePhase(p.id, phid, -1); render(); });
+    item.querySelector('.phase-down').addEventListener('click', () => { movePhase(p.id, phid, 1); render(); });
+    item.querySelector('.phase-del').addEventListener('click', () => {
+      const ph = p.phases.find(x => x.id === phid);
+      if (confirm(`确认删除阶段「${ph ? ph.name : ''}」？该阶段下的事项将变为未分阶段。`)) {
+        deletePhase(p.id, phid);
+        render();
+      }
+    });
+  });
+
+  return block;
+}
+// 阶段色阶（循环取色，与事项优先级色无关）
+function phaseColor(i) {
+  const colors = ['#4a90d9', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2', '#eb2f96'];
+  return colors[i % colors.length];
 }
 
 // ============ 甘特图（项目内联 & 日历总览共用） ============
@@ -1889,12 +2011,14 @@ function buildGantt(project) {
       const cat = CATEGORIES[t.category] || CATEGORIES.work;
       const off = Math.round((parseDateKey(eventStart(t)) - parseDateKey(minK)) / 86400000);
       const dur = durationDays(eventStart(t), eventEnd(t));
+      // 阶段标签（P8.1）：事项条前显示阶段名小标
+      const phTag = phaseBadgeHtml(t);
       rowsHtml += `
         <div class="gantt-row" style="height:${GANTT_ROW_H}px">
           <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
                style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${cat.color}55;border-left-color:${cat.color}"
                title="${escapeHtml(t.title)}（${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
-            <span class="bar-title">${escapeHtml(t.title)}</span>
+            ${phTag}<span class="bar-title">${escapeHtml(t.title)}</span>
             <span class="bar-resize"></span>
           </div>
         </div>`;
@@ -2034,7 +2158,7 @@ function buildOverviewGantt() {
             <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
                  style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${tcat.color}55;border-left-color:${tcat.color}"
                  title="${escapeHtml(t.title)}（${pjPrefix}${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
-              <span class="bar-title">${escapeHtml(t.title)}</span>
+              ${phaseBadgeHtml(t)}<span class="bar-title">${escapeHtml(t.title)}</span>
               <span class="bar-resize"></span>
             </div>
           </div>`;
@@ -2598,6 +2722,89 @@ function deleteProject(id) {
   if (bases[id]) { delete bases[id]; saveSyncBases(bases); }
   render();
 }
+
+// ============ 项目阶段（Phase）管理（P8.1） ============
+// 纯函数：生成阶段 id
+function genPhaseId() {
+  return 'ph' + String(Date.now()) + Math.random().toString(36).slice(2, 6);
+}
+// 新增阶段（返回新阶段对象）
+function addPhase(projectId, name) {
+  const list = loadProjects();
+  const p = list.find(x => x.id === projectId);
+  if (!p) return null;
+  const phase = { id: genPhaseId(), name: String(name || '').trim() || '新阶段', order: p.phases.length };
+  p.phases = p.phases || [];
+  p.phases.push(phase);
+  p.revision = (p.revision || 1) + 1;
+  p.updatedAt = new Date().toISOString();
+  saveProjects(list);
+  return phase;
+}
+// 重命名阶段
+function renamePhase(projectId, phaseId, name) {
+  const list = loadProjects();
+  const p = list.find(x => x.id === projectId);
+  if (!p) return false;
+  const ph = (p.phases || []).find(x => x.id === phaseId);
+  if (!ph) return false;
+  ph.name = String(name || '').trim() || ph.name;
+  p.revision = (p.revision || 1) + 1;
+  p.updatedAt = new Date().toISOString();
+  saveProjects(list);
+  return true;
+}
+// 移动阶段顺序（dir: -1 上移 / 1 下移）
+function movePhase(projectId, phaseId, dir) {
+  const list = loadProjects();
+  const p = list.find(x => x.id === projectId);
+  if (!p || !p.phases) return false;
+  const i = p.phases.findIndex(x => x.id === phaseId);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= p.phases.length) return false;
+  const tmp = p.phases[i]; p.phases[i] = p.phases[j]; p.phases[j] = tmp;
+  p.phases.forEach((ph, k) => { ph.order = k; });
+  p.revision = (p.revision || 1) + 1;
+  p.updatedAt = new Date().toISOString();
+  saveProjects(list);
+  return true;
+}
+// 删除阶段：该阶段下所有事项 phaseId 置空（归为未分阶段）
+function deletePhase(projectId, phaseId) {
+  const list = loadProjects();
+  const p = list.find(x => x.id === projectId);
+  if (!p || !p.phases) return false;
+  p.phases = p.phases.filter(x => x.id !== phaseId);
+  p.revision = (p.revision || 1) + 1;
+  p.updatedAt = new Date().toISOString();
+  saveProjects(list);
+  // 清空该阶段事项的 phaseId
+  const all = loadEvents();
+  let changed = false;
+  for (const ev of all) {
+    if (ev.phaseId === phaseId) { ev.phaseId = ''; changed = true; }
+  }
+  if (changed) saveEvents(all);
+  return true;
+}
+// 纯函数：获取项目阶段名称映射（{phaseId: name}），便于事项显示阶段标签
+function phaseNameMap(projectId) {
+  const p = getProject(projectId);
+  const m = {};
+  if (p && Array.isArray(p.phases)) {
+    for (const ph of p.phases) m[ph.id] = ph.name;
+  }
+  return m;
+}
+// 事项阶段小标签 HTML（P8.1）：用于甘特图事项条前
+function phaseBadgeHtml(ev) {
+  if (!ev.phaseId || !ev.projectId) return '';
+  const m = phaseNameMap(ev.projectId);
+  const name = m[ev.phaseId];
+  if (!name) return '';
+  return `<span class="gantt-phase-tag" title="阶段：${escapeHtml(name)}">${escapeHtml(name)}</span>`;
+}
+
 
 // ============ 项目文件导出 / 导入 / 三方合并（非实时协作） ============
 // 模型：Base（上次双方共同版本 = 同步基准）/ Local（本地当前）/ Incoming（导入文件），
