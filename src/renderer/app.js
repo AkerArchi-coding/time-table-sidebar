@@ -4878,6 +4878,7 @@ function buildQuickAdd(panel) {
 const POMO = {
   workMin: 25, breakMin: 5,
   longMin: 15, cycle: 4,  // 连续完成 cycle 个专注后进入长休息
+  autoStart: false,       // P8.3：休息结束后自动开始下一个专注
   session: 0,             // 当前周期内已完成的专注数
   isLong: false,          // 当前休息是否为长休息
   started: false,         // 本次应用启动后是否开始过（用于"准备专注/继续"文案）
@@ -4899,11 +4900,13 @@ function loadPomoCfg() {
     if ([5, 10].includes(c.breakMin)) POMO.breakMin = c.breakMin;
     if ([10, 15, 20, 30].includes(c.longMin)) POMO.longMin = c.longMin;
     if ([2, 3, 4, 6].includes(c.cycle)) POMO.cycle = c.cycle;
+    if (typeof c.autoStart === 'boolean') POMO.autoStart = c.autoStart;
   } catch { /* 首次运行 */ }
 }
 function savePomoCfg() {
   localStorage.setItem('pomoCfg', JSON.stringify({
-    workMin: POMO.workMin, breakMin: POMO.breakMin, longMin: POMO.longMin, cycle: POMO.cycle
+    workMin: POMO.workMin, breakMin: POMO.breakMin, longMin: POMO.longMin, cycle: POMO.cycle,
+    autoStart: POMO.autoStart
   }));
 }
 loadPomoCfg();
@@ -5018,11 +5021,15 @@ function pomoTick() {
     POMO.mode = 'work';
     if (POMO.isLong) { POMO.session = 0; POMO.isLong = false; }   // 长休息结束 → 开启新一轮周期
     POMO.remainMs = pomoPhaseMs();
-    POMO.running = false;
-    POMO.endAt = 0;
-    clearInterval(POMO.timerId); POMO.timerId = null;
     playChime(CHIME.ding);
     pomoNotify('番茄钟', '休息结束，开始下一个专注');
+    if (POMO.autoStart) {
+      POMO.endAt = Date.now() + POMO.remainMs;   // P8.3：自动开始下一个专注
+    } else {
+      POMO.running = false;
+      POMO.endAt = 0;
+      clearInterval(POMO.timerId); POMO.timerId = null;
+    }
   }
   pomoPaint(true);
 }
@@ -5151,6 +5158,9 @@ function buildPomodoro(panel) {
         </select>
       </label>
     </div>
+    <div class="pomo-row">
+      <label class="pomo-cb-label"><input type="checkbox" class="pomo-autostart"${POMO.autoStart ? ' checked' : ''}> 休息结束自动开始下一个专注</label>
+    </div>
     <div class="tool-hint">今日已完成 ${POMO.doneToday} 个专注；连续 ${POMO.cycle} 个专注后自动长休息；计时与系统时钟互不影响</div>
   `;
   panel.querySelector('.pomo-toggle').addEventListener('click', () => POMO.running ? pomoPause() : pomoStart());
@@ -5190,6 +5200,10 @@ function buildPomodoro(panel) {
     if (POMO.session >= POMO.cycle) POMO.session = 0;   // 周期缩短时回到起点
     savePomoCfg();
     pomoPaint(true);
+  });
+  panel.querySelector('.pomo-autostart').addEventListener('change', (e) => {
+    POMO.autoStart = e.target.checked;
+    savePomoCfg();
   });
 }
 
