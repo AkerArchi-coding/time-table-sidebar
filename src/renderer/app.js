@@ -3996,6 +3996,8 @@ const CHIME = {
   remind: [[880, 0, 0.3], [880, 0.24, 0.3], [1174.7, 0.48, 0.7]]   // 事项到点（三连音）
 };
 function playChime(pattern) {
+  // P8.4：番茄钟音效（CHIME.ding）可独立关闭，不影响事项到点提醒（CHIME.remind）
+  if (pattern === CHIME.ding && !POMO.soundEnabled) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -4879,6 +4881,7 @@ const POMO = {
   workMin: 25, breakMin: 5,
   longMin: 15, cycle: 4,  // 连续完成 cycle 个专注后进入长休息
   autoStart: false,       // P8.3：休息结束后自动开始下一个专注
+  soundEnabled: true,     // P8.4：番茄钟阶段切换音效开关（不影响事项到点提醒）
   session: 0,             // 当前周期内已完成的专注数
   isLong: false,          // 当前休息是否为长休息
   started: false,         // 本次应用启动后是否开始过（用于"准备专注/继续"文案）
@@ -4901,12 +4904,13 @@ function loadPomoCfg() {
     if ([10, 15, 20, 30].includes(c.longMin)) POMO.longMin = c.longMin;
     if ([2, 3, 4, 6].includes(c.cycle)) POMO.cycle = c.cycle;
     if (typeof c.autoStart === 'boolean') POMO.autoStart = c.autoStart;
+    if (typeof c.soundEnabled === 'boolean') POMO.soundEnabled = c.soundEnabled;
   } catch { /* 首次运行 */ }
 }
 function savePomoCfg() {
   localStorage.setItem('pomoCfg', JSON.stringify({
     workMin: POMO.workMin, breakMin: POMO.breakMin, longMin: POMO.longMin, cycle: POMO.cycle,
-    autoStart: POMO.autoStart
+    autoStart: POMO.autoStart, soundEnabled: POMO.soundEnabled
   }));
 }
 loadPomoCfg();
@@ -5160,6 +5164,7 @@ function buildPomodoro(panel) {
     </div>
     <div class="pomo-row">
       <label class="pomo-cb-label"><input type="checkbox" class="pomo-autostart"${POMO.autoStart ? ' checked' : ''}> 休息结束自动开始下一个专注</label>
+      <label class="pomo-cb-label"><input type="checkbox" class="pomo-sound"${POMO.soundEnabled ? ' checked' : ''}> 阶段切换音效</label>
     </div>
     <div class="tool-hint">今日已完成 ${POMO.doneToday} 个专注；连续 ${POMO.cycle} 个专注后自动长休息；计时与系统时钟互不影响</div>
   `;
@@ -5203,6 +5208,10 @@ function buildPomodoro(panel) {
   });
   panel.querySelector('.pomo-autostart').addEventListener('change', (e) => {
     POMO.autoStart = e.target.checked;
+    savePomoCfg();
+  });
+  panel.querySelector('.pomo-sound').addEventListener('change', (e) => {
+    POMO.soundEnabled = e.target.checked;
     savePomoCfg();
   });
 }
