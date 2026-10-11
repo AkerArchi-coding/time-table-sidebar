@@ -477,7 +477,8 @@ function calSubStatusInfo(s) {
 }
 
 // 拉取并刷新单个订阅（就地更新 sub.lastSync/lastError/etag/lastModified；成功才覆盖缓存）。
-// 始终带条件头；304 保留缓存与 lastSync（返回 true）。网络/解析失败保留旧缓存。
+// 始终带条件头；304 视为一次成功同步：更新 lastSync（否则订阅永远处于"到期"态，每个
+// 5 分钟 tick 都会重发请求，刷新频率设置失效——沙箱实测发现），但缓存与 syncedAt 保留。
 async function calSubRefreshOne(sub) {
   if (!window.timetable || !window.timetable.calSubFetch) { sub.lastError = '当前环境不支持订阅'; return false; }
   try {
@@ -485,11 +486,11 @@ async function calSubRefreshOne(sub) {
     if (res && res.ok) {
       if (res.etag) sub.etag = res.etag;
       if (res.lastModified) sub.lastModified = res.lastModified;
+      sub.lastSync = new Date().toISOString();    // 200/304 都是成功联系
       if (!res.notModified) {
         const oldEvs = loadCalSubEvents(sub.id);
         const evs = parseIcs(res.content || '');
         saveCalSubEvents(sub.id, evs);
-        sub.lastSync = new Date().toISOString();
         onCalSubEventsReplaced(sub, oldEvs, evs);   // P9.3 提醒账本联动钩子
       }
       // 304 / 200 都说明订阅仍可访问：清除错误标记（旧缓存保留）

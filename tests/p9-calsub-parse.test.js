@@ -234,18 +234,21 @@ test('calSubRefreshOne：200 覆盖缓存（v2）并保存 etag/lastSync', async
   assert.strictEqual(raw.events[0].title, '会 A');
 });
 
-test('calSubRefreshOne：304 不覆盖缓存、不动 lastSync，但更新 etag', async () => {
+test('calSubRefreshOne：304 不覆盖缓存与 syncedAt，但更新 lastSync/etag（修复到期重发轮询）', async () => {
   const { sb, storage } = loadApp();
   appEval(sb, `saveCalSubEvents('cs1', parseIcs(${JSON.stringify(ICS_A)}), '2026-09-01T00:00:00.000Z')`);
   await stubFetch(sb, `({ ok: true, notModified: true, etag: '"v2"', lastModified: '' })`);
   const { ok, sub } = await refreshInSandbox(sb, `{ id: 'cs1', url: 'https://a.com/a.ics', etag: '"v1"', lastModified: '', lastSync: '2026-09-01T00:00:00.000Z', lastError: '旧错误' }`);
   assert.strictEqual(ok, true);
-  assert.strictEqual(sub.lastSync, '2026-09-01T00:00:00.000Z', '304 不更新 lastSync');
+  assert.ok(sub.lastSync && sub.lastSync !== '2026-09-01T00:00:00.000Z', '304 更新 lastSync（成功联系），否则 calSubDue 永远判定到期');
   assert.strictEqual(sub.etag, '"v2"');
   assert.strictEqual(sub.lastError, '');
   const raw = JSON.parse(storage.getItem('calSubCache_cs1'));
   assert.strictEqual(raw.events[0].title, '会 A', '旧缓存保留');
-  assert.strictEqual(raw.syncedAt, '2026-09-01T00:00:00.000Z');
+  assert.strictEqual(raw.syncedAt, '2026-09-01T00:00:00.000Z', '缓存内容时间戳不变');
+  // 刷新频率语义回归：304 刷新后立即不再到期
+  const now = Date.parse(sub.lastSync) + 1000;
+  assert.strictEqual(appEval(sb, `calSubDue({ refreshIntervalMin: 60, lastSync: ${JSON.stringify(sub.lastSync)} }, ${now})`), false, '1 小时档 304 后不应立即到期');
 });
 
 test('calSubRefreshOne：网络/解析失败保留旧缓存并标记错误', async () => {
