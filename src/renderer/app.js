@@ -255,6 +255,132 @@ function getEventsByDate(key) {
   dayIndex.result.set(key, sorted);
   return sorted;
 }
+
+// ============ 外部日历只读订阅（P6.4） ============
+// 订阅定义存 calSubscriptions：[{ id, name, url, enabled, lastSync, lastError }]（进三档备份，不进同步快照）；
+// 解析缓存存 calSubCache_{id}：{ syncedAt, events }（仅本机缓存，不进备份/同步）。
+// 订阅事项以只读投影叠加到周/月视图：不落业务库，不参与勾选/删除/右键/拖拽/统计/提醒/批量/同步。
+const CAL_SUB_REFRESH_MS = 60 * 60 * 1000;   // 每小时自动刷新
+let calSubsCache = null;
+const calSubEventsMemo = new Map();          // id → 解析后事项数组（避免月历 42 格重复 JSON.parse）
+
+function loadCalSubs() {
+  if (calSubsCache) return calSubsCache;
+  try {
+    const list = JSON.parse(localStorage.getItem('calSubscriptions') || '[]');
+    calSubsCache = Array.isArray(list) ? list.filter(s => s && s.id && s.url) : [];
+  } catch { calSubsCache = []; }
+  return calSubsCache;
+}
+function saveCalSubs(list) {
+  calSubsCache = list;
+  try { localStorage.setItem('calSubscriptions', JSON.stringify(list)); }
+  catch (e) { notifyStorageFail(e); }
+}
+function calSubCacheKey(id) { return 'calSubCache_' + id; }
+function loadCalSubEvents(id) {
+  if (calSubEventsMemo.has(id)) return calSubEventsMemo.get(id);
+  let evs = [];
+  try {
+    const o = JSON.parse(localStorage.getItem(calSubCacheKey(id)) || 'null');
+    if (o && Array.isArray(o.events)) evs = o.events;
+  } catch { evs = []; }
+  calSubEventsMemo.set(id, evs);
+  return evs;
+}
+function saveCalSubEvents(id, events) {
+  calSubEventsMemo.set(id, events);
+  try { localStorage.setItem(calSubCacheKey(id), JSON.stringify({ syncedAt: new Date().toISOString(), events })); }
+  catch (e) { notifyStorageFail(e); }
+}
+function removeCalSub(id) {
+  saveCalSubs(loadCalSubs().filter(s => s.id !== id));
+  calSubEventsMemo.delete(id);
+  try { localStorage.removeItem(calSubCacheKey(id)); } catch { /* 缓存清理失败无碍 */ }
+}
+
+// 某日订阅投影：enabled 订阅的缓存事项按覆盖日/重复规则投影；打 _subName 来源标记（只读）
+function getCalSubEventsByDate(key) {
+  const out = [];
+  for (const sub of loadCalSubs()) {
+    if (!sub.enabled) continue;
+    const evs = loadCalSubEvents(sub.id);
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
+      if (isRecurOn(ev)) {
+        if (recurMatchesDate(ev.recur, eventStart(ev), key)) {
+          out.push({ ...ev, id: sub.id + '#' + i + '@' + key, date: key, startDate: key, endDate: key, _subName: sub.name });
+        }
+      } else {
+        const s = eventStart(ev);
+        if (!s) continue;
+        const e = eventEnd(ev) || s;
+        if (s <= key && key <= e) out.push({ ...ev, id: sub.id + '#' + i, _subName: sub.name });
+      }
+    }
+  }
+  return sortDayEvents(out);
+}
+
+// 订阅地址 → 默认名称（主机名优先）
+function calSubNameFromUrl(url) {
+  try { return new URL(url).hostname || url.slice(0, 40); } catch { return url.slice(0, 40); }
+}
+function mkCalSubId() {
+  return 'cs' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// 拉取并刷新单个订阅（就地更新 sub.lastSync/lastError；成功重写缓存）。返回是否成功。
+async function calSubRefreshOne(sub) {
+  if (!window.timetable || !window.timetable.calSubFetch) { sub.lastError = '当前环境不支持订阅'; return false; }
+  try {
+    const res = await window.timetable.calSubFetch(sub.url);
+    if (res && res.ok) {
+      saveCalSubEvents(sub.id, parseIcs(res.content));
+      sub.lastSync = new Date().toISOString();
+      sub.lastError = '';
+      return true;
+    }
+    sub.lastError = (res && res.error) || '拉取失败';
+  } catch (e) {
+    sub.lastError = String((e && e.message) || e);
+  }
+  return false;
+}
+
+// 刷新全部启用订阅；silent 时不打断用户（仅在无工具/表单打开时补一次重绘）
+async function calSubRefreshAll(silent) {
+  const subs = loadCalSubs().filter(s => s.enabled);
+  if (!subs.length) return;
+  for (const s of subs) await calSubRefreshOne(s);
+  saveCalSubs(loadCalSubs());   // 持久化 lastSync/lastError（引用已就地更新）
+  if (!silent) { render(); return; }
+  if (windowVisible && !currentTool &&
+      !document.querySelector('.add-form:not(.hidden), .project-form:not(.hidden), .editor-block')) {
+    render();
+  }
+}
+
+// 周视图订阅条目（只读）：无勾选/删除/右键/拖拽，点击 toast 详情
+function buildCalSubItem(ev) {
+  const cat = CATEGORIES[ev.category] || CATEGORIES.work;
+  const item = document.createElement('div');
+  item.className = 'calsub-item' + (ev.done ? ' done' : '');
+  item.style.borderLeftColor = cat.color;
+  item.innerHTML = `
+    <span class="event-time">${escapeHtml(ev.time || '')}</span>
+    <span class="calsub-badge" title="来自订阅「${escapeHtml(ev._subName || '')}」">订阅</span>
+    <span class="event-title">${escapeHtml(ev.title)}</span>
+  `;
+  const rng = ev.endDate && ev.endDate !== ev.startDate ? `${ev.startDate} ~ ${ev.endDate}` : (ev.startDate || '');
+  item.title = `${ev.title}\n${rng}${ev.time ? ' ' + ev.time : ''}${ev.description ? '\n' + ev.description : ''}\n—— 来自订阅「${ev._subName || ''}」（只读）`;
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showToast(`订阅事项（只读）：${ev.title}　${rng}${ev.time ? ' ' + ev.time : ''}`);
+  });
+  return item;
+}
+
 // 按开始日期排序（无日期排最后），再按时间
 function sortEvents(list) {
   return [...list].sort((a, b) => {
@@ -1262,6 +1388,34 @@ function buildMonthView() {
       });
       cellEl.appendChild(chip);
     }
+
+    // 外部订阅只读投影（P6.4）：虚线条叠加，收起态最多 2 条；无 data-id，不参与右键/拖拽/改期
+    const subEvs = getCalSubEventsByDate(cell.key);
+    for (const sev of subEvs.slice(0, expanded ? subEvs.length : 2)) {
+      const scat = CATEGORIES[sev.category] || CATEGORIES.work;
+      const schip = document.createElement('div');
+      schip.className = 'calsub-ev' + (sev.done ? ' done' : '');
+      schip.style.borderLeftColor = scat.color;
+      schip.textContent = (sev.time ? sev.time + ' ' : '') + sev.title;
+      schip.title = `${sev.title}（订阅：${sev._subName || ''}，只读）`;
+      schip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showToast(`订阅事项（只读）：${sev.title}${sev.time ? ' ' + sev.time : ''}`);
+      });
+      cellEl.appendChild(schip);
+    }
+    if (!expanded && subEvs.length > 2) {
+      const subMore = document.createElement('div');
+      subMore.className = 'month-ev-more';
+      subMore.textContent = `+${subEvs.length - 2} 订阅`;
+      subMore.title = '展开当日全部事项';
+      subMore.addEventListener('click', (e) => {
+        e.stopPropagation();
+        monthToggleExpand(cell.key);
+        render();
+      });
+      cellEl.appendChild(subMore);
+    }
     if (expanded || evs.length > 3) {
       const more = document.createElement('div');
       more.className = 'month-ev-more';
@@ -1482,6 +1636,8 @@ function buildDayCard(d, opts = {}) {
   // 标签筛选（P3.3）：仅过滤显示，不影响排序控件/投影数据本身
   const projEvents = getEventsByDate(key);
   const events = opts.tagFilter ? filterByTag(projEvents, opts.tagFilter) : projEvents;
+  // 外部订阅只读投影（P6.4）：标签筛选时订阅不参与（标签体系不同源）
+  const subEvs = opts.tagFilter ? [] : getCalSubEventsByDate(key);
 
   const card = document.createElement('div');
   card.className = 'day-card' + (isToday ? ' today' : '') + (opts.anchorCard ? ' selected' : '');
@@ -1504,7 +1660,7 @@ function buildDayCard(d, opts = {}) {
 
   const list = document.createElement('div');
   list.className = 'event-list';
-  if (events.length === 0) {
+  if (events.length === 0 && subEvs.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
     hint.textContent = '— 无 —';
@@ -1512,6 +1668,8 @@ function buildDayCard(d, opts = {}) {
   } else {
     // 显示所属项目徽标（未归类同样标注，与事项视图行为一致）
     for (const ev of events) list.appendChild(buildEventItem(ev, { showProject: true }));
+    // 订阅事项叠加在本地事项之后（只读，不参与勾选/删除/右键/拖拽）
+    for (const ev of subEvs) list.appendChild(buildCalSubItem(ev));
   }
   card.appendChild(list);
 
@@ -3796,10 +3954,35 @@ let icalImportItems = null;
 // ---- 工具：iCal 导入（选文件 → 预览勾选 → 选目标项目 → 导入） ----
 function buildIcalImport(panel) {
   if (!icalImportItems) {
+    const subs = loadCalSubs();
     panel.innerHTML = `
       <div class="tool-hint">从 .ics 日历文件导入事项：先选择文件预览，勾选后确认。</div>
       <button type="button" class="set-btn ical-pick-btn">选择 .ics 文件…</button>
       <div class="tool-hint ical-pick-err"></div>
+      <div class="calsub-block">
+        <div class="calsub-title">外部日历订阅（只读）</div>
+        <div class="tool-hint">粘贴 .ics 订阅地址，事项叠加到周/月视图；不进统计/批量/同步，每小时自动刷新。</div>
+        <div class="qa-row">
+          <input type="text" class="calsub-url" placeholder="https://…/calendar.ics" spellcheck="false" />
+          <button type="button" class="set-btn calsub-add-btn">添加</button>
+        </div>
+        <div class="tool-hint calsub-add-err"></div>
+        <div class="calsub-list">
+          ${subs.length === 0 ? '<div class="tool-hint">暂无订阅</div>' : subs.map(s => `
+            <div class="calsub-row" data-id="${s.id}">
+              <input type="checkbox" class="calsub-enabled" ${s.enabled ? 'checked' : ''} title="启用/停用" />
+              <span class="calsub-main">
+                <span class="calsub-name">${escapeHtml(s.name)}</span>
+                <span class="calsub-url-text" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</span>
+                <span class="calsub-status${s.lastError ? ' err' : ''}">${s.lastError
+                  ? '同步失败：' + escapeHtml(s.lastError)
+                  : (s.lastSync ? '同步于 ' + escapeHtml(s.lastSync.slice(0, 16).replace('T', ' ')) : '尚未同步')}</span>
+              </span>
+              <button type="button" class="set-btn calsub-refresh" title="立即刷新">刷新</button>
+              <button type="button" class="set-btn danger calsub-del" title="删除订阅及其缓存">删除</button>
+            </div>`).join('')}
+        </div>
+      </div>
     `;
     const pickBtn = panel.querySelector('.ical-pick-btn');
     pickBtn.addEventListener('click', async () => {
@@ -3826,6 +4009,55 @@ function buildIcalImport(panel) {
       } finally {
         pickBtn.disabled = false;
       }
+    });
+
+    // ---- 订阅管理（P6.4） ----
+    const errEl = panel.querySelector('.calsub-add-err');
+    const addBtn = panel.querySelector('.calsub-add-btn');
+    addBtn.addEventListener('click', async () => {
+      const url = String(panel.querySelector('.calsub-url').value || '').trim();
+      if (!/^https?:\/\//i.test(url)) { errEl.textContent = '订阅地址需以 http(s):// 开头'; return; }
+      if (loadCalSubs().some(s => s.url === url)) { errEl.textContent = '该地址已订阅'; return; }
+      errEl.textContent = '';
+      addBtn.disabled = true;
+      try {
+        const sub = { id: mkCalSubId(), name: calSubNameFromUrl(url), url, enabled: true, lastSync: '', lastError: '' };
+        const ok = await calSubRefreshOne(sub);
+        if (!ok) { errEl.textContent = '添加失败：' + (sub.lastError || '拉取失败'); return; }
+        saveCalSubs([...loadCalSubs(), sub]);
+        showToast(`已订阅「${sub.name}」`);
+        render();
+      } finally {
+        addBtn.disabled = false;
+      }
+    });
+    panel.querySelectorAll('.calsub-row').forEach(row => {
+      const id = row.dataset.id;
+      const sub = loadCalSubs().find(s => s.id === id);
+      if (!sub) return;
+      row.querySelector('.calsub-enabled').addEventListener('change', (e) => {
+        sub.enabled = !!e.target.checked;
+        saveCalSubs(loadCalSubs());
+        render();   // 启停影响周/月视图叠加，整体重绘
+      });
+      const refBtn = row.querySelector('.calsub-refresh');
+      refBtn.addEventListener('click', async () => {
+        refBtn.disabled = true;
+        try {
+          const ok = await calSubRefreshOne(sub);
+          saveCalSubs(loadCalSubs());
+          showToast(ok ? `「${sub.name}」已刷新` : `「${sub.name}」刷新失败：${sub.lastError}`, ok ? '' : 'error');
+          render();
+        } finally {
+          refBtn.disabled = false;
+        }
+      });
+      row.querySelector('.calsub-del').addEventListener('click', () => {
+        if (!confirm(`删除订阅「${sub.name}」？\n仅移除订阅与本机缓存，不影响任何本地事项。`)) return;
+        removeCalSub(id);
+        showToast(`已删除订阅「${sub.name}」`);
+        render();
+      });
     });
     return;
   }
@@ -3905,7 +4137,7 @@ const TOOL_DEFS = {
   clipboard: { title: '剪贴板',   pinEditing: false },
   sync:      { title: '设备同步', pinEditing: false },
   settings:  { title: '设置',     pinEditing: false },
-  ical:      { title: 'iCal 导入', pinEditing: true }
+  ical:      { title: 'iCal 互通', pinEditing: true }
 };
 
 function openTool(name) {
@@ -6923,6 +7155,9 @@ setInterval(() => {
 // 天气：启动拉取一次，之后每 10 分钟刷新（窄条温度直显）；窗口隐藏时不请求
 refreshWeather();
 setInterval(() => { if (windowVisible) refreshWeather(); }, 10 * 60 * 1000);
+// 外部日历订阅（P6.4）：启动补刷一次（如备份恢复后无缓存），之后每小时静默自动刷新
+calSubRefreshAll(true).catch(() => {});
+setInterval(() => { calSubRefreshAll(true).catch(() => {}); }, CAL_SUB_REFRESH_MS);
 // 系统资源窄条读数：展开态 2s / 收起态 15s 自适应采样（主进程每次采样需 busy-wait 220ms，
 // 收起时 3s 常驻是无谓开销；工具面板打开时由 buildSys 自己的 2s 定时器负责）。
 // 窗口隐藏进托盘时不采样（窄条不可见），仅以 30s 空转保活，重新显示时由 onWindowVisible 立即补采。

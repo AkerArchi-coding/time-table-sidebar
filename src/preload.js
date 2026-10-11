@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('timetable', {
   // iCal 互通（P4.3）：导出/导入 .ics 文件对话框
   icalExportDialog: (defaultName, content) => ipcRenderer.invoke('ical-export-dialog', { defaultName, content }),
   icalImportDialog: () => ipcRenderer.invoke('ical-import-dialog'),
+  // 外部日历订阅（P6.4）：主进程代拉 .ics 文本（渲染层不直接联网）
+  calSubFetch: (url) => ipcRenderer.invoke('cal-sub-fetch', url),
   // 数据目录：查询当前路径 / 迁移到新目录（需重启）
   dataDirGet: () => ipcRenderer.invoke('data-dir-get'),
   dataDirMigrate: (backup) => ipcRenderer.invoke('data-dir-migrate', backup),

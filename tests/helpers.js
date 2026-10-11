@@ -92,6 +92,7 @@ function loadApp() {
     requestAnimationFrame: () => 0,
     matchMedia: () => ({ matches: false, media: '', addEventListener: noop, removeEventListener: noop, addListener: noop, removeListener: noop }),
     AudioContext: fakeAudioContextCtor(),
+    URL,   // Chromium 全局 URL（P6.4 订阅地址解析用）
     alert: noop, confirm: () => false, prompt: () => null
   };
   sandbox.window = sandbox;

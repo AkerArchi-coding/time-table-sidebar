@@ -2525,6 +2525,78 @@ html, body {
 .ical-item.dup .ical-item-sub { color: var(--danger); }
     .ical-again { margin-top: 8px; width: 100%; }
 
+/* ===== P6.4 外部日历只读订阅 ===== */
+/* 面板订阅区块 */
+.calsub-block { margin-top: 16px; padding-top: 10px; border-top: 1px solid rgba(var(--txt-rgb), 0.12); }
+.calsub-title { font-size: 13px; font-weight: 600; color: var(--txt); margin-bottom: 4px; }
+.calsub-url { flex: 1; min-width: 0; }
+.calsub-add-err { color: var(--danger); }
+.calsub-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.calsub-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(var(--txt-rgb), 0.05);
+}
+.calsub-row input[type="checkbox"] { flex: none; }
+.calsub-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.calsub-name { font-size: 12.5px; color: var(--txt); font-weight: 600; }
+.calsub-url-text {
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.45);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.calsub-status { font-size: 10px; color: rgba(var(--txt-rgb), 0.55); }
+.calsub-status.err { color: var(--danger); }
+.calsub-row .set-btn { flex: none; padding: 3px 8px; font-size: 11px; }
+.calsub-row .set-btn.danger { background: rgba(231, 76, 60, 0.18); color: #ff9d94; }
+.calsub-row .set-btn.danger:hover { background: rgba(231, 76, 60, 0.35); color: var(--txt); }
+/* 周视图订阅条目（只读）：斜纹底 + 虚线左边条，区别于本地事项 */
+.calsub-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  border-left: 3px dashed var(--accent);
+  background: repeating-linear-gradient(135deg,
+    rgba(var(--txt-rgb), 0.04) 0 6px,
+    rgba(var(--txt-rgb), 0.08) 6px 12px);
+  font-size: 12px;
+  color: rgba(var(--txt-rgb), 0.85);
+  cursor: default;
+  user-select: none;
+}
+.calsub-item.done .event-title { text-decoration: line-through; opacity: 0.6; }
+.calsub-badge {
+  flex: 0 0 auto;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px dashed rgba(var(--txt-rgb), 0.35);
+  color: rgba(var(--txt-rgb), 0.6);
+}
+/* 月历订阅条（只读）：虚线左边条 + 更低饱和 */
+.calsub-ev {
+  font-size: 10px;
+  line-height: 1.35;
+  border-left: 2px dashed var(--accent);
+  border-radius: 3px;
+  background: rgba(var(--txt-rgb), 0.04);
+  padding: 0 3px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.8;
+}
+.calsub-ev.done { text-decoration: line-through; opacity: 0.5; }
+
     /* ===== P5.1 统计增强 ===== */
     /* 待办积压：逾期数字红色高亮 */
     .stat-num.warn b { color: var(--danger); }

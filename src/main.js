@@ -681,6 +681,48 @@ function requestJson(url, timeoutMs = 7000) {
   });
 }
 
+// ============ 外部日历订阅（P6.4）：拉取 .ics 文本（与 requestJson 同套设施，仅解析不同） ============
+function requestText(url, timeoutMs = 10000, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https:') ? https : http;
+    const req = lib.get(url, { headers: { 'User-Agent': 'timetable-desktop/1.0' } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirects >= 5) { reject(new Error('重定向次数过多')); return; }
+        requestText(res.headers.location, timeoutMs, redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error('HTTP ' + res.statusCode));
+        return;
+      }
+      let raw = '';
+      let size = 0;
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > 5 * 1024 * 1024) { req.destroy(new Error('日历文件过大（>5MB）')); return; }   // 防御异常大响应
+        raw += c;
+      });
+      res.on('end', () => resolve(raw));
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
+    req.on('error', reject);
+  });
+}
+// 拉取订阅 URL 的 .ics 原文；协议白名单 + 错误文案化（渲染层只负责解析）
+ipcMain.handle('cal-sub-fetch', async (_e, url) => {
+  const u = String(url || '').trim();
+  if (!/^https?:\/\//i.test(u)) return { ok: false, error: '订阅地址需以 http(s):// 开头' };
+  try {
+    const content = await requestText(u, 10000);
+    return { ok: true, content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 // IP 粗略定位（多源 fallback，全部免 Key）
 ipcMain.handle('weather-ip-location', async () => {
   // 源 1：ipwho.is（HTTPS）
