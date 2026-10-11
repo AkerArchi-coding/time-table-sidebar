@@ -40,7 +40,8 @@ const PAGE_STEP = 7;           // 翻页步长
 let currentView = 'today';         // today | projects | tasks | calendar
 let expandedProjectId = null;      // 项目页同层展开的项目 id（手风琴，同时只展开一个）
 const projectDetailModes = {};     // 各项目内联面板的子模式：list | gantt（默认 list）
-let calendarMode = 'calendar';     // 日历页显示模式：calendar（日历）| gantt（总览甘特）
+let calendarMode = 'calendar';     // 日历页显示模式：calendar（日历）| gantt（总览甘特）| month（月历，P4.2）
+let monthAnchor = new Date();      // 月历当前锚点（仅年月有效，P4.2）
 let syncState = null;              // 项目文件同步预览状态（导入/合并进行中，switchView 时清除）
 let currentTool = null;            // 当前打开的侧边栏工具（内容区覆盖层），null=显示视图
 
@@ -1001,14 +1002,17 @@ function renderToday() {
   bindViewEvents();
 }
 
-// ============ 日历视图（周视图 / 总览甘特） ============
+// ============ 日历视图（周视图 / 总览甘特 / 月历） ============
 function renderWeek() {
   const todayD = today();
   const todayKey = dateKey(todayD);
   const isGantt = calendarMode === 'gantt';
+  const isMonth = calendarMode === 'month';
 
   if (isGantt) {
     setHeader('总览甘特', '全部项目与事项', false);
+  } else if (isMonth) {
+    setHeader(`${monthAnchor.getFullYear()}年${monthAnchor.getMonth() + 1}月`, '月历', true);
   } else {
     const rangeEnd = addDays(rangeStart, RANGE_DAYS - 1);
     const sameMonth = rangeStart.getMonth() === rangeEnd.getMonth();
@@ -1023,23 +1027,196 @@ function renderWeek() {
 
   weekList.innerHTML = '';
 
-  // 日历 / 总览甘特 显示模式切换
+  // 日历 / 总览甘特 / 月历 显示模式切换
   const modeTabs = document.createElement('div');
   modeTabs.className = 'sub-tabs';
   modeTabs.innerHTML = `
-    <button data-cal-mode="calendar" class="${!isGantt ? 'active' : ''}">日历</button>
+    <button data-cal-mode="calendar" class="${!isGantt && !isMonth ? 'active' : ''}">日历</button>
     <button data-cal-mode="gantt" class="${isGantt ? 'active' : ''}">总览甘特</button>
+    <button data-cal-mode="month" class="${isMonth ? 'active' : ''}">月历</button>
   `;
   weekList.appendChild(modeTabs);
 
   if (isGantt) {
     weekList.appendChild(buildOverviewGantt());
+  } else if (isMonth) {
+    weekList.appendChild(buildMonthView());
   } else {
     for (let i = 0; i < RANGE_DAYS; i++) {
       weekList.appendChild(buildDayCard(addDays(rangeStart, i)));
     }
+    enableWeekDrag();   // 周视图拖拽改期（P4.2）
   }
   bindViewEvents();
+}
+
+// ============ 月历视图（P4.2）：6×7 网格 + 热力底色 + 项目工期条 ============
+// 纯函数：构建 6×7 月历网格（周一开头，复用 startOfWeek），42 格固定（跨月尾首衔接）
+function buildMonthGrid(anchor) {
+  const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+  const start = startOfWeek(first);
+  const out = [];
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(start, i);
+    out.push({
+      date: d, key: dateKey(d), day: d.getDate(),
+      inMonth: d.getMonth() === anchor.getMonth(),
+      isToday: isSameDay(d, today())
+    });
+  }
+  return out;
+}
+
+// 月历面板：格子显示当日事项小条（≤3 条超出 +N，完成划线保留）+ 底部项目工期细条；
+// 点格子 → 周视图定位该日；点事项条 → 打开编辑（重复投影按模板，与右键语义一致）
+function buildMonthView() {
+  const wrap = document.createElement('div');
+  wrap.className = 'month-view';
+  const grid = buildMonthGrid(monthAnchor);
+  const projects = loadProjects();
+
+  // 工具行：回到本月（跨月浏览后快速归位）
+  const bar = document.createElement('div');
+  bar.className = 'month-toolbar';
+  const todayBtn = document.createElement('button');
+  todayBtn.className = 'month-today-btn';
+  todayBtn.textContent = '回到本月';
+  todayBtn.addEventListener('click', () => { monthAnchor = new Date(); render(); });
+  bar.appendChild(todayBtn);
+  wrap.appendChild(bar);
+
+  const gridEl = document.createElement('div');
+  gridEl.className = 'month-grid';
+  for (const w of ['一', '二', '三', '四', '五', '六', '日']) {
+    const wk = document.createElement('div');
+    wk.className = 'month-wk';
+    wk.textContent = w;
+    gridEl.appendChild(wk);
+  }
+  for (const cell of grid) {
+    const evs = getEventsByDate(cell.key);
+    const cellEl = document.createElement('div');
+    cellEl.className = 'month-cell' + (cell.inMonth ? '' : ' out') + (cell.isToday ? ' today' : '');
+    cellEl.dataset.key = cell.key;
+    cellEl.dataset.heat = String(Math.min(evs.length, 5));   // 热力分档 0~5
+    cellEl.title = evs.length ? `${cell.key}（${evs.length} 项）` : cell.key;
+
+    const dayEl = document.createElement('div');
+    dayEl.className = 'month-day';
+    dayEl.textContent = String(cell.day);
+    cellEl.appendChild(dayEl);
+
+    for (const ev of evs.slice(0, 3)) {
+      const cat = CATEGORIES[ev.category] || CATEGORIES.work;
+      const chip = document.createElement('div');
+      chip.className = 'month-ev' + (ev.done ? ' done' : '');
+      chip.style.borderLeftColor = cat.color;
+      chip.textContent = (ev.time ? ev.time + ' ' : '') + ev.title;
+      chip.title = ev.title;
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // 虚拟事项（模板id@日期）→ 编辑作用于模板（与右键菜单语义一致）
+        const id = ev.id.includes('@') ? ev.id.slice(0, ev.id.lastIndexOf('@')) : ev.id;
+        const real = loadEvents().find(x => x.id === id);
+        if (real) openTaskEditor(real);
+      });
+      cellEl.appendChild(chip);
+    }
+    if (evs.length > 3) {
+      const more = document.createElement('div');
+      more.className = 'month-ev-more';
+      more.textContent = `+${evs.length - 3}`;
+      cellEl.appendChild(more);
+    }
+
+    // 项目工期：起止覆盖该日的项目画细条（颜色随分类）
+    const pjs = projects.filter(p => p.startDate && p.endDate && p.startDate <= cell.key && cell.key <= p.endDate);
+    if (pjs.length) {
+      const pjWrap = document.createElement('div');
+      pjWrap.className = 'month-pjs';
+      for (const p of pjs.slice(0, 2)) {
+        const bar = document.createElement('i');
+        bar.className = 'month-pj';
+        bar.style.background = (CATEGORIES[p.category] || CATEGORIES.work).color;
+        bar.title = p.name;
+        pjWrap.appendChild(bar);
+      }
+      if (pjs.length > 2) {
+        const morePj = document.createElement('i');
+        morePj.className = 'month-pj more';
+        morePj.title = `还有 ${pjs.length - 2} 个项目`;
+        pjWrap.appendChild(morePj);
+      }
+      cellEl.appendChild(pjWrap);
+    }
+
+    // 点格子空白区 → 切周视图定位该日（事项条已 stopPropagation）
+    cellEl.addEventListener('click', () => {
+      rangeStart = addDays(parseDateKey(cell.key), -1);   // 与 gotoSearchResult 一致：该日落在第二张卡
+      calendarMode = 'calendar';
+      render();
+    });
+    gridEl.appendChild(cellEl);
+  }
+  wrap.appendChild(gridEl);
+  return wrap;
+}
+
+// ============ 周视图拖拽改期（P4.2）：mousedown 自实现（HTML5 DnD 在无边框透明窗口表现不稳） ============
+// 拖起半透明浮层跟随鼠标，落点日卡片高亮，松手 moveEventToDate（多日事项整体平移）；
+// 重复事项虚拟投影按模板改期（与右键「调整到哪一天」语义一致）；批量模式/工具层不启用
+function enableWeekDrag() {
+  if (batchMode) return;
+  let ghost = null, dragId = '', started = false, sx = 0, sy = 0;
+  const clearHover = () => weekList.querySelectorAll('.day-card.drag-over').forEach(c => c.classList.remove('drag-over'));
+
+  weekList.querySelectorAll('.event-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || currentTool || editing) return;
+      if (e.target.closest('.event-check,.event-del,.ev-voice-btn')) return;   // 控件不触发拖拽
+      dragId = item.dataset.id || '';
+      if (!dragId) return;
+      sx = e.clientX; sy = e.clientY; started = false;
+
+      const onMove = (me) => {
+        if (!started && Math.hypot(me.clientX - sx, me.clientY - sy) < 6) return;   // 位移阈值，普通点击不受扰
+        if (!started) {
+          started = true;
+          ghost = document.createElement('div');
+          ghost.className = 'drag-ghost';
+          ghost.textContent = item.querySelector('.event-title').textContent;
+          document.body.appendChild(ghost);
+          item.classList.add('dragging');
+        }
+        ghost.style.left = (me.clientX + 12) + 'px';
+        ghost.style.top = (me.clientY + 8) + 'px';
+        clearHover();
+        const el = document.elementFromPoint(me.clientX, me.clientY);
+        const card = el && el.closest ? el.closest('.day-card[data-date]') : null;
+        if (card) card.classList.add('drag-over');
+      };
+      const onUp = (ue) => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        if (!started) return;
+        if (ghost) { ghost.remove(); ghost = null; }
+        item.classList.remove('dragging');
+        clearHover();
+        const el = document.elementFromPoint(ue.clientX, ue.clientY);
+        const card = el && el.closest ? el.closest('.day-card[data-date]') : null;
+        if (!card) return;
+        const targetKey = card.dataset.date;
+        const srcKey = item.closest('.day-card') ? item.closest('.day-card').dataset.date : '';
+        if (targetKey && targetKey !== srcKey) {
+          // 虚拟投影 id（模板id@日期）→ 作用于模板
+          const id = dragId.includes('@') ? dragId.slice(0, dragId.lastIndexOf('@')) : dragId;
+          moveEventToDate(id, targetKey);
+        }
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
 }
 
 // 单日排序控件（仅今日视图显示；选择持久化到 localStorage，甘特/其他视图不受影响）
@@ -1914,8 +2091,10 @@ function toggleDone(id) {
   }
 }
 
-// 将事项移动到指定日期：多日事项整体平移（保持持续天数），单日事项直接改期
+// 将事项移动到指定日期：多日事项整体平移（保持持续天数），单日事项直接改期；
+// 虚拟投影 id（模板id@日期）解析为模板（拖拽/右键改期共用，语义：重复系列整体改起始日）
 function moveEventToDate(id, newDateKey) {
+  if (id.includes('@')) id = id.slice(0, id.lastIndexOf('@'));
   const all = loadEvents();
   const ev = all.find(e => e.id === id);
   if (ev) {
@@ -5467,12 +5646,14 @@ viewTabs.querySelectorAll('button').forEach(btn => {
   btn.addEventListener('click', () => switchView(btn.dataset.view));
 });
 
-// ============ 范围导航（滚动轮换，仅日历视图） ============
+// ============ 范围导航（滚动轮换，仅日历视图；月历模式翻月） ============
 $('prevWeek').addEventListener('click', () => {
+  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() - 1, 1); render(); return; }
   rangeStart = addDays(rangeStart, -PAGE_STEP);
   render();
 });
 $('nextWeek').addEventListener('click', () => {
+  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 1); render(); return; }
   rangeStart = addDays(rangeStart, PAGE_STEP);
   render();
 });
