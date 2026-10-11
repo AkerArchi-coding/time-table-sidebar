@@ -4162,6 +4162,41 @@ function buildStats(events, history, rangeDays, now) {
     return { id: p.id, name: p.name, done: projDone.get(p.id) || 0, total };
   }).filter(p => p.total > 0).sort((a, b) => (b.done - a.done) || a.name.localeCompare(b.name)).slice(0, 5);
 
+  // 连续专注 streak（P5.1）：从今天往前数连续有专注的天数；
+  // 今天尚无记录则从昨天起算（避免"当天还没专注"清零连续记录）
+  const focusMinMap = new Map((history || []).map(h => [h.date, h.minutes || 0]));
+  let streak = 0;
+  {
+    let cursor = stripTime(now);
+    if ((focusMinMap.get(dateKey(cursor)) || 0) <= 0) cursor = addDays(cursor, -1);
+    while ((focusMinMap.get(dateKey(cursor)) || 0) > 0) { streak++; cursor = addDays(cursor, -1); }
+  }
+
+  // 上一周期对照（P5.1）：区间整体前移同长度，口径与主区间一致
+  const pKeys = dateKeyRange(dateKey(addDays(stripTime(now), -(days * 2 - 1))), days);
+  const pIdx = new Map(pKeys.map((k, i) => [k, i]));
+  let prevCreated = 0, prevDone = 0, prevFocusMinutes = 0;
+  for (const ev of events || []) {
+    if (pIdx.has(isoDateKey(ev.createdAt))) prevCreated++;
+    if (ev.done && pIdx.has(isoDateKey(ev.updatedAt || ev.createdAt))) prevDone++;
+  }
+  for (const h of history || []) {
+    if (pIdx.has(h.date)) prevFocusMinutes += h.minutes || 0;
+  }
+
+  // 未完成积压（P5.1）：一次性事项按截止日分档；重复事项执行区间语义复杂，不计入
+  const tkNow = dateKey(now);
+  const backlog = { overdue: 0, today: 0, future: 0, undated: 0, urgent: 0 };
+  for (const ev of events || []) {
+    if (ev.done || isRecurOn(ev)) continue;
+    const s = eventStart(ev), e = eventEnd(ev) || s;
+    if (ev.urgency === 'urgent') backlog.urgent++;
+    if (!s) { backlog.undated++; continue; }
+    if (e < tkNow) backlog.overdue++;
+    else if (s <= tkNow) backlog.today++;
+    else backlog.future++;
+  }
+
   return {
     startKey: keys[0], endKey: keys[keys.length - 1], daily,
     totals: {
@@ -4169,8 +4204,34 @@ function buildStats(events, history, rangeDays, now) {
       rate: createdTotal ? Math.round(doneTotal / createdTotal * 100) : 0,
       focusCount, focusMinutes
     },
-    categories, projects
+    categories, projects,
+    streak,
+    prev: { createdTotal: prevCreated, doneTotal: prevDone, focusMinutes: prevFocusMinutes },
+    backlog
   };
+}
+
+// 本周 vs 上周对照（P5.1 纯函数）：完成/新增/专注分钟 三指标，固定按自然周（周一~周日）
+function weekCompare(events, history, now) {
+  now = now || new Date();
+  const wk = new Set(dateKeyRange(dateKey(startOfWeek(now)), 7));
+  const pw = new Set(dateKeyRange(dateKey(addDays(startOfWeek(now), -7)), 7));
+  let done = 0, created = 0, pDone = 0, pCreated = 0;
+  for (const ev of events || []) {
+    const ck = isoDateKey(ev.createdAt), dk = isoDateKey(ev.updatedAt || ev.createdAt);
+    if (wk.has(ck)) created++;
+    if (pw.has(ck)) pCreated++;
+    if (ev.done) {
+      if (wk.has(dk)) done++;
+      if (pw.has(dk)) pDone++;
+    }
+  }
+  let fm = 0, pfm = 0;
+  for (const h of history || []) {
+    if (wk.has(h.date)) fm += h.minutes || 0;
+    if (pw.has(h.date)) pfm += h.minutes || 0;
+  }
+  return { done, created, focusMinutes: fm, prev: { done: pDone, created: pCreated, focusMinutes: pfm } };
 }
 // 周报 Markdown：本周（周一~周日）完成事项按项目分组 + 专注汇总 + 每日完成条形
 function buildWeeklyReport(events, projects, history, now) {
@@ -4223,15 +4284,19 @@ function buildWeeklyReport(events, projects, history, now) {
 
 // ---- 统计工具面板 ----
 let statsRangeDays = 7;   // 统计区间：7 | 30
+let statsTrendMode = 'focus';   // 趋势卡数据列：focus（专注分钟）| done（完成事项）（P5.1）
 function buildStatsPanel(panel) {
   const now = today();
   const st = buildStats(loadEvents(), loadPomoHistory(), statsRangeDays, now);
   const t = st.totals;
-  const maxMin = Math.max(1, ...st.daily.map(d => d.focusMinutes));
+  // 趋势卡双指标（P5.1）：专注分钟 / 完成事项，同一柱状图切数据列
+  const trendDone = statsTrendMode === 'done';
+  const maxCol = Math.max(1, ...st.daily.map(d => trendDone ? d.done : d.focusMinutes));
   const maxCat = Math.max(1, ...st.categories.map(c => c.count));
   const WD_CH = ['日', '一', '二', '三', '四', '五', '六'];
   const barCols = st.daily.map(d => {
-    const h = Math.round(d.focusMinutes / maxMin * 100);
+    const v = trendDone ? d.done : d.focusMinutes;
+    const h = Math.round(v / maxCol * 100);
     const wd = statsRangeDays === 7 ? '<em>' + WD_CH[parseDateKey(d.date).getDay()] + '</em>' : '';
     return `<div class="stat-bar-col" title="${d.date}：专注 ${d.focusCount} 次/${d.focusMinutes} 分钟，完成 ${d.done} 项">
       <div class="stat-bar-track"><div class="stat-bar" style="height:${h}%"></div></div>
@@ -4239,6 +4304,29 @@ function buildStatsPanel(panel) {
     </div>`;
   }).join('');
   const wsK = dateKey(startOfWeek(now)), weK = dateKey(addDays(startOfWeek(now), 6));
+  // 专注报表（P5.1）：区间天数/日均/峰值/连续 + 今日任务 top（按 taskId 聚合当日番茄钟日志）
+  const focusDays = st.daily.filter(d => d.focusMinutes > 0).length;
+  const peakMin = st.daily.reduce((m, d) => Math.max(m, d.focusMinutes), 0);
+  const avgMin = focusDays ? Math.round(t.focusMinutes / focusDays) : 0;
+  const taskAgg = new Map();
+  for (const l of loadPomoTaskLogs()) {
+    const k = l.taskId || '_';
+    const cur = taskAgg.get(k) || { title: l.taskTitle || '未绑定事项', count: 0, minutes: 0 };
+    cur.count++; cur.minutes += l.minutes || 0;
+    taskAgg.set(k, cur);
+  }
+  const todayTasks = [...taskAgg.values()].sort((a, b) => b.minutes - a.minutes).slice(0, 3);
+  // 本周 vs 上周（P5.1）
+  const wc = weekCompare(loadEvents(), loadPomoHistory(), now);
+  const cmpRow = (label, cur, pv, unit) => {
+    const diff = cur - pv;
+    const arrow = pv <= 0
+      ? '<span class="stat-cmp-na">—</span>'
+      : diff > 0 ? `<span class="stat-cmp up">↑ ${diff}</span>`
+      : diff < 0 ? `<span class="stat-cmp down">↓ ${-diff}</span>`
+      : '<span class="stat-cmp-na">持平</span>';
+    return `<div class="stat-cmp-row"><span class="stat-cmp-label">${label}</span><b>${cur}</b><span class="stat-cmp-unit">${unit}</span>${arrow}</div>`;
+  };
 
   panel.innerHTML = `
     <div class="stat-toolbar">
@@ -4248,9 +4336,15 @@ function buildStatsPanel(panel) {
       </div>
     </div>
     <div class="stat-card">
-      <div class="stat-card-title">专注趋势<span class="stat-card-sub">分钟/日</span></div>
+      <div class="stat-card-title">趋势<span class="stat-card-sub">${st.startKey} ~ ${st.endKey}</span></div>
+      <div class="stat-toolbar">
+        <div class="stat-range">
+          <button type="button" class="stat-range-btn" data-trend="focus">专注分钟</button>
+          <button type="button" class="stat-range-btn" data-trend="done">完成事项</button>
+        </div>
+      </div>
       <div class="stat-bars">${barCols}</div>
-      <div class="stat-card-foot">共 ${t.focusCount} 次专注 · ${t.focusMinutes} 分钟</div>
+      <div class="stat-card-foot">${trendDone ? `共完成 ${t.doneTotal} 项` : `共 ${t.focusCount} 次专注 · ${t.focusMinutes} 分钟`}</div>
     </div>
     <div class="stat-card">
       <div class="stat-card-title">事项概览<span class="stat-card-sub">${st.startKey} ~ ${st.endKey}</span></div>
@@ -4261,6 +4355,43 @@ function buildStatsPanel(panel) {
       </div>
       ${progressBarHtml(Math.min(t.doneTotal, t.createdTotal), t.createdTotal)}
       <div class="stat-card-hint">完成率＝区间完成数/新增数；补做历史事项时可超过 100%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">待办积压<span class="stat-card-sub">未完成事项</span></div>
+      <div class="stat-overview">
+        <div class="stat-num${st.backlog.overdue ? ' warn' : ''}"><b>${st.backlog.overdue}</b><span>已逾期</span></div>
+        <div class="stat-num"><b>${st.backlog.today}</b><span>今日</span></div>
+        <div class="stat-num"><b>${st.backlog.future}</b><span>未来</span></div>
+        <div class="stat-num"><b>${st.backlog.undated}</b><span>无日期</span></div>
+      </div>
+      <div class="stat-card-hint">${st.backlog.overdue + st.backlog.today + st.backlog.future + st.backlog.undated === 0 ? '当前没有待办事项' : `紧急未完成 ${st.backlog.urgent} 项${st.backlog.overdue ? '；存在逾期，建议优先处理' : ''}`}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">专注报表<span class="stat-card-sub">近 ${statsRangeDays} 天</span></div>
+      <div class="stat-overview">
+        <div class="stat-num"><b>${focusDays}</b><span>专注天数</span></div>
+        <div class="stat-num"><b>${avgMin}</b><span>日均分钟</span></div>
+        <div class="stat-num"><b>${peakMin}</b><span>单日最高</span></div>
+        <div class="stat-num"><b>${st.streak}</b><span>连续天数</span></div>
+      </div>
+      ${todayTasks.length ? `<div class="stat-rows">
+        ${todayTasks.map(x => `
+          <div class="stat-row">
+            <span class="stat-row-name" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</span>
+            <span class="stat-row-bar"><i style="width:${Math.min(100, Math.round(x.minutes / Math.max(1, todayTasks[0].minutes) * 100))}%"></i></span>
+            <span class="stat-row-num">${x.minutes}′</span>
+          </div>`).join('')}
+      </div>
+      <div class="stat-card-hint">今日专注任务（按分钟排序）</div>` : ''}
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-title">本周 vs 上周<span class="stat-card-sub">${wsK} ~ ${weK}</span></div>
+      <div class="stat-rows">
+        ${cmpRow('完成事项', wc.done, wc.prev.done, '项')}
+        ${cmpRow('新增事项', wc.created, wc.prev.created, '项')}
+        ${cmpRow('专注时长', wc.focusMinutes, wc.prev.focusMinutes, '分')}
+      </div>
+      <div class="stat-card-hint">箭头为与上周的差值；上周基数为 0 时显示 —</div>
     </div>
     <div class="stat-card">
       <div class="stat-card-title">分类分布<span class="stat-card-sub">按完成数</span></div>
@@ -4294,11 +4425,22 @@ function buildStatsPanel(panel) {
     </div>
   `;
 
-  // 区间切换：重绘本面板
-  panel.querySelectorAll('.stat-range-btn').forEach(btn => {
+  // 区间切换：重绘本面板（按 data-r 作用域，避免误绑趋势切换按钮）
+  panel.querySelectorAll('[data-r]').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.r) === statsRangeDays);
     btn.addEventListener('click', () => {
       statsRangeDays = Number(btn.dataset.r);
+      panel.innerHTML = '';
+      buildStatsPanel(panel);
+    });
+  });
+
+  // 趋势卡切换（P5.1）：专注分钟 / 完成事项，同一柱状图切数据列
+  panel.querySelectorAll('[data-trend]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.trend === statsTrendMode);
+    btn.addEventListener('click', () => {
+      if (statsTrendMode === btn.dataset.trend) return;
+      statsTrendMode = btn.dataset.trend;
       panel.innerHTML = '';
       buildStatsPanel(panel);
     });

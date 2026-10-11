@@ -2405,4 +2405,25 @@ html, body {
 .ical-item-title { font-size: 13px; color: var(--txt); word-break: break-all; }
 .ical-item-sub { font-size: 11px; color: rgba(var(--txt-rgb), 0.55); word-break: break-all; }
 .ical-item.dup .ical-item-sub { color: var(--danger); }
-.ical-again { margin-top: 8px; width: 100%; }
+    .ical-again { margin-top: 8px; width: 100%; }
+
+    /* ===== P5.1 统计增强 ===== */
+    /* 待办积压：逾期数字红色高亮 */
+    .stat-num.warn b { color: var(--danger); }
+    /* 本周 vs 上周环比行 */
+    .stat-cmp-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11.5px;
+      padding: 3px 0;
+    }
+    .stat-cmp-label {
+      flex: 1;
+      color: rgba(var(--txt-rgb), 0.75);
+    }
+    .stat-cmp-row b { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--txt); }
+    .stat-cmp-unit { font-size: 10px; color: rgba(var(--txt-rgb), 0.45); margin-right: 4px; }
+    .stat-cmp.up { color: #6fbf73; font-size: 11px; }
+    .stat-cmp.down { color: var(--danger); font-size: 11px; }
+    .stat-cmp-na { font-size: 11px; color: rgba(var(--txt-rgb), 0.4); }
