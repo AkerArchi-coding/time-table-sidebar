@@ -35,7 +35,7 @@ test('parseTags：单个标签超长截断 12 字符；空/非字符串输入返
 
 test('collectTags：汇总全部事项标签、去重、按中文排序', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');   // 模拟重启，让 loadEvents 重新读盘
+  appEval(sb, 'invalidateDerivedCaches()');
   storage.setItem('events', JSON.stringify([
     { id: 'a', title: 'A', tags: ['工作', '重要'] },
     { id: 'b', title: 'B', tags: ['工作', '家庭'] },
@@ -50,7 +50,7 @@ test('collectTags：汇总全部事项标签、去重、按中文排序', () => 
 
 test('collectTags：无任何标签时返回空数组', () => {
   const { sb } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   assert.deepStrictEqual(hostify(sb.collectTags()), []);
 });
 
@@ -73,7 +73,7 @@ test('filterByTag：空标签原样返回；命中过滤；无 tags 字段的事
 
 test('loadEvents 老数据迁移：无 tags 字段自动补 []', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');   // 初始化已缓存空列表，先清掉再写入
+  appEval(sb, 'invalidateDerivedCaches()');
   storage.setItem('events', JSON.stringify([{ id: 'old1', title: '旧事项' }]));
   const list = hostify(sb.loadEvents());
   assert.deepStrictEqual(list[0].tags, [], '迁移兜底补空数组');
@@ -81,7 +81,7 @@ test('loadEvents 老数据迁移：无 tags 字段自动补 []', () => {
 
 test('addEvent：tags 字段落库', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   sb.addEvent({ title: '带标签事项', startDate: '2026-10-10', endDate: '2026-10-10', tags: ['工作', '重要'] });
   const list = JSON.parse(storage.getItem('events'));
   assert.deepStrictEqual(list[0].tags, ['工作', '重要']);
@@ -89,7 +89,7 @@ test('addEvent：tags 字段落库', () => {
 
 test('addEvent：未传 tags 时兜底为 []（不产生 undefined 字段）', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   sb.addEvent({ title: '无标签事项', startDate: '2026-10-10', endDate: '2026-10-10' });
   const list = JSON.parse(storage.getItem('events'));
   assert.deepStrictEqual(list[0].tags, []);
@@ -97,7 +97,7 @@ test('addEvent：未传 tags 时兜底为 []（不产生 undefined 字段）', (
 
 test('updateEvent：可更新 tags 字段', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   sb.addEvent({ title: '初始', startDate: '2026-10-10', endDate: '2026-10-10', tags: ['工作'] }, true);
   const id = JSON.parse(storage.getItem('events'))[0].id;
   sb.updateEvent(id, { tags: ['家庭', '周末'] });
@@ -109,7 +109,7 @@ test('updateEvent：可更新 tags 字段', () => {
 
 test('重复事项虚拟投影继承模板 tags，filterByTag 可命中虚拟事项', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   storage.setItem('events', JSON.stringify([
     { id: 'r1', title: '晨会', startDate: '2026-10-05', endDate: '2026-10-05',
       recur: { freq: 'daily', interval: 1, until: '' }, tags: ['工作'] }

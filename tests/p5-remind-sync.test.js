@@ -7,7 +7,7 @@ const { loadApp, appEval, hostify } = require('./helpers');
 // 直写 storage 后必须清 app.js 的 eventsCache（loadApp 初始化时已缓存空数组）
 function seedEvents(sb, storage, list) {
   storage.setItem('events', JSON.stringify(list));
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
 }
 // 构造一个今天到点（当前 HH:MM）的普通事项
 function dueEvent(sb, extra) {

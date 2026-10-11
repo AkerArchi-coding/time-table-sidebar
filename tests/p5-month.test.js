@@ -15,7 +15,7 @@ const KEY = (y, m, d) => {
 // 直写 storage 后必须清 app.js 的 eventsCache（loadApp 初始化时已缓存空数组）
 function seedEvents(sb, storage, list) {
   storage.setItem('events', JSON.stringify(list));
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
 }
 
 test('buildMonthGrid：固定 42 格，1 号落在其所在周的周一开头的网格内', () => {

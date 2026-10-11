@@ -163,7 +163,7 @@ test('getEventsByDate：老数据 recur 缺失时迁移兜底为 null，行为�
   storage.setItem('events', JSON.stringify([
     { id: 'old1', title: '老事项', date: '2026-10-10', startDate: '2026-10-10', endDate: '2026-10-10', done: false }
   ]));
-  appEval(sb, 'eventsCache = null');   // 模拟重启后从盘加载（初始化已缓存空数组）
+  appEval(sb, 'invalidateDerivedCaches()');   // 模拟重启后从盘加载（初始化已缓存空数组）
   const list = sb.loadEvents();
   assert.strictEqual(list[0].recur, null, '迁移兜底 recur=null');
   assert.deepStrictEqual(

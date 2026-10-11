@@ -103,6 +103,20 @@ function fmtShort(key) {
 // 事项（Task）：projectId 为空表示未归类
 // 缓存策略：首次读盘后常驻内存，saveEvents 写穿更新缓存（读多写少，消除每次 JSON.parse）
 let eventsCache = null;
+let dayIndex = null;   // P6.3 按日索引：{ plain: Map<key, 非重复事项[]>, result: Map<key, 排序后当日数组（含重复投影）> }
+// 派生缓存统一失效（P6.3）：eventsCache 与 dayIndex 同生共死，直写 localStorage 后必须调本函数
+function invalidateDerivedCaches() {
+  eventsCache = null;
+  dayIndex = null;
+}
+// localStorage 写入失败可见化（P6.3）：10s 节流，避免连续弹
+let storageWarnedAt = 0;
+function notifyStorageFail(err) {
+  const now = Date.now();
+  if (now - storageWarnedAt < 10000) return;
+  storageWarnedAt = now;
+  showToast('本地存储写入失败：' + (err && err.message || '配额可能已满') + '，本次修改可能不会被保存', 'error');
+}
 function loadEvents() {
   if (eventsCache) return eventsCache;
   try {
@@ -136,7 +150,9 @@ function loadEvents() {
 }
 function saveEvents(list) {
   eventsCache = Array.isArray(list) ? list : [];
-  localStorage.setItem('events', JSON.stringify(eventsCache));
+  dayIndex = null;   // 派生索引随写失效
+  try { localStorage.setItem('events', JSON.stringify(eventsCache)); }
+  catch (e) { notifyStorageFail(e); }
 }
 // ---- 重复事项（P3.2）：不物理展开副本，按日虚拟投影 ----
 const RECUR_FREQS = ['daily', 'weekdays', 'weekly', 'monthly'];
@@ -193,7 +209,9 @@ function recurDoneSet(evId, key, val) {
   if (val) map[evId + '|' + key] = true;
   else delete map[evId + '|' + key];
   recurDoneCache = map;
-  localStorage.setItem('recurDone', JSON.stringify(map));
+  dayIndex = null;   // 投影完成态变化 → 按日索引失效（P6.3）
+  try { localStorage.setItem('recurDone', JSON.stringify(map)); }
+  catch (e) { notifyStorageFail(e); }
 }
 
 // 生成某日虚拟事项视图：复制模板字段 + 复合 id + 覆盖完成态（纯视图对象，不改模板数据）
@@ -208,17 +226,34 @@ function makeVirtualEvent(ev, key) {
   };
 }
 
+// 按日查询（P6.3 索引版）：非重复事项一次全量扫描挂到覆盖日（plain），
+// 重复模板按查询日现算投影；排序结果按日缓存（result）。月历 42 格 = 1 次构建 + O(1) 命中。
+// 返回数组为缓存共享引用：调用方只读，不得原地修改（现有调用均为 forEach/map/渲染）。
 function getEventsByDate(key) {
-  const list = [];
-  for (const ev of loadEvents()) {
-    if (isRecurOn(ev)) {
-      // 重复事项：起始日及后续命中日统一走虚拟投影（完成态按日记录，三处口径一致）
-      if (recurMatchesDate(ev.recur, eventStart(ev), key)) list.push(makeVirtualEvent(ev, key));
-    } else if (eventSpansDate(ev, key)) {
-      list.push(ev);              // 多日事项在覆盖的每一天都显示
+  if (!dayIndex) dayIndex = { plain: null, result: new Map() };
+  if (dayIndex.result.has(key)) return dayIndex.result.get(key);
+  if (!dayIndex.plain) {
+    const plain = new Map();
+    for (const ev of loadEvents()) {
+      if (isRecurOn(ev)) continue;   // 重复模板不进 plain（按查询日现算）
+      const s = eventStart(ev);
+      if (!s) continue;              // 无日期事项不属于任何一天（与原口径一致）
+      const e = eventEnd(ev) || s;
+      for (let d = s; d <= e; d = addDaysKey(d, 1)) {
+        if (!plain.has(d)) plain.set(d, []);
+        plain.get(d).push(ev);
+      }
     }
+    dayIndex.plain = plain;
   }
-  return sortDayEvents(list);
+  const list = [...(dayIndex.plain.get(key) || [])];
+  for (const ev of loadEvents()) {
+    // 重复事项：起始日及后续命中日统一走虚拟投影（完成态按日记录，三处口径一致）
+    if (isRecurOn(ev) && recurMatchesDate(ev.recur, eventStart(ev), key)) list.push(makeVirtualEvent(ev, key));
+  }
+  const sorted = sortDayEvents(list);
+  dayIndex.result.set(key, sorted);
+  return sorted;
 }
 // 按开始日期排序（无日期排最后），再按时间
 function sortEvents(list) {
@@ -300,7 +335,8 @@ function loadProjects() {
 }
 function saveProjects(list) {
   projectsCache = Array.isArray(list) ? list : [];
-  localStorage.setItem('projects', JSON.stringify(projectsCache));
+  try { localStorage.setItem('projects', JSON.stringify(projectsCache)); }
+  catch (e) { notifyStorageFail(e); }
 }
 function getProject(id) {
   return loadProjects().find(p => p.id === id) || null;
@@ -3405,15 +3441,16 @@ function buildSyncLogBlock() {
   return box;
 }
 
-// 非阻塞提示条
+// 非阻塞提示条（type: '' 默认 / 'error' 红色，P6.3 写入失败可见化用）
 let toastTimer = null;
-function showToast(msg) {
+function showToast(msg, type) {
   let t = document.querySelector('.toast');
   if (!t) {
     t = document.createElement('div');
     t.className = 'toast';
     document.body.appendChild(t);
   }
+  t.classList.toggle('error', type === 'error');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
@@ -3431,6 +3468,7 @@ function showReminderToast(ev, aheadMin) {
     document.body.appendChild(t);
   }
   const prefix = aheadMin > 0 ? `提前 ${aheadMin} 分钟提醒：` : '到点提醒：';
+  t.classList.remove('error');   // 复用 .toast 元素，清掉写入失败的红色态（P6.3）
   t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><span class="toast-acts"><button class="toast-done" type="button">完成</button><button class="toast-snooze" type="button">稍后 5 分钟</button></span>`;
   t.classList.add('show', 'toast-remind');
   clearTimeout(toastTimer);
@@ -6354,6 +6392,7 @@ function buildSettings(panel) {
           eventMode = a ? 'overwrite' : 'keep';
         }
         const ret = window.Backup.applyImport(data, { projectMode, eventMode });
+        invalidateDerivedCaches();   // applyImport 直写 localStorage，派生缓存统一失效（P6.3）
         showToast('导入完成：' + (ret.logs.length ? ret.logs[0] : '无变化'));
         render();
       } catch (e) {

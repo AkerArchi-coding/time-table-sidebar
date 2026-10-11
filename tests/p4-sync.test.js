@@ -72,7 +72,7 @@ test('addTombstone：写入、幂等更新、按 deletedAt 滚动', () => {
 
 test('deleteEvent 写墓碑；批量删除批量写墓碑', () => {
   const { sb, storage } = loadApp();
-  appEval(sb, 'eventsCache = null');
+  appEval(sb, 'invalidateDerivedCaches()');
   storage.setItem('events', JSON.stringify([
     { id: 'e1', title: 'A', startDate: '2026-10-10', endDate: '2026-10-10' },
     { id: 'e2', title: 'B', startDate: '2026-10-10', endDate: '2026-10-10' },
