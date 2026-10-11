@@ -5352,6 +5352,35 @@ function buildHeatmap(daily, metric, endKey) {
   }
   return { cells, cols: 53, rows: 7, max };
 }
+// 每日工作记录（P8.2 纯函数）：指定日期的完成事项清单 + 专注汇总
+// 完成口径：ev.done 且 isoDateKey(updatedAt || createdAt) === dateKeyStr
+// 专注口径：history 中 date === dateKeyStr 的记录
+// doneItems 按 time 升序，无时间排最后
+function buildDailyWorkRecord(events, history, dateKeyStr, projects) {
+  const dk = String(dateKeyStr || '');
+  const projMap = new Map((projects || []).map(p => [p.id, p.name]));
+  const doneItems = (events || [])
+    .filter(ev => ev.done && isoDateKey(ev.updatedAt || ev.createdAt) === dk)
+    .map(ev => ({
+      id: ev.id,
+      title: ev.title || '',
+      time: ev.time || '',
+      projectName: ev.projectId ? (projMap.get(ev.projectId) || '未分类') : '未归类',
+      projectId: ev.projectId || ''
+    }))
+    .sort((a, b) => {
+      if (!!a.time !== !!b.time) return a.time ? -1 : 1;
+      return (a.time || '').localeCompare(b.time || '');
+    });
+  const h = (history || []).find(x => x.date === dk) || {};
+  return {
+    date: dk,
+    doneCount: doneItems.length,
+    focusCount: h.count || 0,
+    focusMinutes: h.minutes || 0,
+    doneItems
+  };
+}
 // 周报 Markdown：本周（周一~周日）完成事项按项目分组 + 专注汇总 + 每日完成条形
 function buildWeeklyReport(events, projects, history, now) {
   now = now || new Date();
@@ -5405,6 +5434,7 @@ function buildWeeklyReport(events, projects, history, now) {
 let statsRangeDays = 7;   // 统计区间：7 | 30
 let statsTrendMode = 'focus';   // 趋势卡数据列：focus（专注分钟）| done（完成事项）（P5.1）
 let statsHmMode = 'done';   // 年热力图口径：done（完成事项）| focusMinutes（专注分钟）（P7.5）
+let statsDailyDate = '';   // 每日工作记录当前查看日期（P8.2），空串表示今天
 function buildStatsPanel(panel) {
   const now = today();
   const st = buildStats(loadEvents(), loadPomoHistory(), statsRangeDays, now);
@@ -5440,6 +5470,9 @@ function buildStatsPanel(panel) {
   const wc = weekCompare(loadEvents(), loadPomoHistory(), now);
   // 年热力图（P7.5）：近 53 周网格，口径随 statsHmMode 切换
   const hm = buildHeatmap(buildStats(loadEvents(), loadPomoHistory(), 371, now).daily, statsHmMode, dateKey(now));
+  // 每日工作记录（P8.2）：statsDailyDate 空串表示今天
+  const dwrKey = statsDailyDate || dateKey(now);
+  const dwr = buildDailyWorkRecord(loadEvents(), loadPomoHistory(), dwrKey, loadProjects());
   const hmUnit = statsHmMode === 'done' ? ' 项完成' : ' 分钟专注';
   const hmGrid = (() => {
     const cols = [];
@@ -5565,6 +5598,28 @@ function buildStatsPanel(panel) {
       <div class="hm-scroll"><div class="hm-grid">${hmGrid}</div></div>
       <div class="hm-legend">少<span class="hm-cell hm-l0"></span><span class="hm-cell hm-l1"></span><span class="hm-cell hm-l2"></span><span class="hm-cell hm-l3"></span><span class="hm-cell hm-l4"></span>多</div>
     </div>
+    <div class="stat-card">
+      <div class="stat-card-title">每日工作记录<span class="stat-card-sub">${dwrKey} 周${WD_CH[parseDateKey(dwrKey).getDay()]}</span></div>
+      <div class="stat-toolbar">
+        <div class="stat-range">
+          <button type="button" class="stat-range-btn" data-dwr="prev">← 前一天</button>
+          <button type="button" class="stat-range-btn" data-dwr="today">今天</button>
+          <button type="button" class="stat-range-btn" data-dwr="next">后一天 →</button>
+        </div>
+      </div>
+      <div class="stat-overview">
+        <div class="stat-num"><b>${dwr.doneCount}</b><span>完成事项</span></div>
+        <div class="stat-num"><b>${dwr.focusCount}</b><span>专注次数</span></div>
+        <div class="stat-num"><b>${dwr.focusMinutes}</b><span>专注分钟</span></div>
+      </div>
+      ${dwr.doneItems.length ? `<div class="stat-rows">
+        ${dwr.doneItems.map(it => `
+          <div class="stat-row">
+            <span class="stat-row-name" title="${escapeHtml(it.title)}">${it.time ? `<span class="dwr-time">${escapeHtml(it.time)}</span>` : ''}${escapeHtml(it.title)}</span>
+            <span class="stat-row-num">${escapeHtml(it.projectName)}</span>
+          </div>`).join('')}
+      </div>` : '<div class="empty-hint">当日暂无完成事项</div>'}
+    </div>
   `;
 
   // 区间切换：重绘本面板（按 data-r 作用域，避免误绑趋势切换按钮）
@@ -5594,6 +5649,18 @@ function buildStatsPanel(panel) {
     btn.addEventListener('click', () => {
       if (statsHmMode === btn.dataset.hm) return;
       statsHmMode = btn.dataset.hm;
+      panel.innerHTML = '';
+      buildStatsPanel(panel);
+    });
+  });
+
+  // 每日工作记录日期导航（P8.2）：前一天 / 今天 / 后一天
+  panel.querySelectorAll('[data-dwr]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cur = statsDailyDate || dateKey(now);
+      if (btn.dataset.dwr === 'today') statsDailyDate = '';
+      else if (btn.dataset.dwr === 'prev') statsDailyDate = addDaysKey(cur, -1);
+      else if (btn.dataset.dwr === 'next') statsDailyDate = addDaysKey(cur, 1);
       panel.innerHTML = '';
       buildStatsPanel(panel);
     });

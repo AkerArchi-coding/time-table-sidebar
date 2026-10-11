@@ -2080,6 +2080,11 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dwr-time {
+  color: rgba(var(--txt-rgb),0.45);
+  font-variant-numeric: tabular-nums;
+  margin-right: 6px;
+}
 .stat-row-bar {
   flex: 1;
   height: 8px;
