@@ -666,7 +666,8 @@ function buildTaskForm(opts = {}) {
   const preCategory = ev ? (ev.category || 'work') : 'work';
   const preUrgency = ev ? (ev.urgency || 'normal') : 'normal';
   const preProject = ev ? (ev.projectId || '') : '';
-  const preRemind = ev ? (ev.remindAhead || 0) : 0;
+  // 提前提醒初值：编辑取事项现值；新建取全局默认提前量（P7.3）
+  const preRemind = ev ? (ev.remindAhead || 0) : (loadAppSettings().remindAheadDefault || 0);
   const preRecurFreq = ev && ev.recur && RECUR_FREQ_LABELS[ev.recur.freq] ? ev.recur.freq : 'none';
   const preRecurUntil = ev && ev.recur ? (ev.recur.until || '') : '';
   const preTags = ev && Array.isArray(ev.tags) ? ev.tags.join(',') : '';
@@ -3736,7 +3737,8 @@ function showReminderToast(ev, aheadMin) {
   }
   const prefix = aheadMin > 0 ? `提前 ${aheadMin} 分钟提醒：` : '到点提醒：';
   t.classList.remove('error');   // 复用 .toast 元素，清掉写入失败的红色态（P6.3）
-  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><span class="toast-acts"><button class="toast-done" type="button">完成</button><button class="toast-snooze" type="button">稍后 5 分钟</button></span>`;
+  // P7.3：贪睡时长三档可选 + 「不再提醒」（当日对该事项静默）
+  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><span class="toast-acts"><button class="toast-done" type="button">完成</button><button class="toast-snooze" data-min="5" type="button">5 分</button><button class="toast-snooze" data-min="10" type="button">10 分</button><button class="toast-snooze" data-min="30" type="button">30 分</button><button class="toast-stop" type="button">不再提醒</button></span>`;
   t.classList.add('show', 'toast-remind');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
@@ -3748,18 +3750,31 @@ function showReminderToast(ev, aheadMin) {
       toggleDone(ev.id);
     });
   }
-  const btn = t.querySelector('.toast-snooze');
-  if (btn) {
+  t.querySelectorAll('.toast-snooze').forEach(btn => {
     btn.addEventListener('click', () => {
+      const min = Number(btn.dataset.min) || 5;
       const list = loadEvents();
       const e = list.find(x => x.id === ev.id);
-      if (e) { e.snoozeUntil = Date.now() + 5 * 60 * 1000; saveEvents(list); }
-      // 移除已提醒标记，使贪睡到期后可再次触发
+      if (e) { e.snoozeUntil = Date.now() + min * 60 * 1000; saveEvents(list); }
+      // 移除已提醒标记与再提醒时间戳，使贪睡到期后可再次触发
       const key = ev.id + '|' + dateKey(today());
       remindedKeys.delete(key);
+      delete remindTs[key];
       saveRemindedKeys();
       t.classList.remove('show');
-      showToast('已贪睡 5 分钟后再次提醒');
+      showToast(`已贪睡 ${min} 分钟后再次提醒`);
+    });
+  });
+  // 不再提醒（P7.3）：加入 stop 集合持久化，当日对该事项不再触发提醒
+  const stopBtn = t.querySelector('.toast-stop');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', () => {
+      const key = ev.id + '|' + dateKey(today());
+      remindStop.add(key);
+      delete remindTs[key];
+      saveRemindedKeys();
+      t.classList.remove('show');
+      showToast('今日不再提醒该事项');
     });
   }
 }
@@ -3794,22 +3809,33 @@ function playChime(pattern) {
 // ============ 事项到点提醒 ============
 // 触发条件：开始日=今天 且 time=当前 HH:MM，仅到点那一分钟内提醒一次（错过不补）。
 // 已提醒标记按日持久化（localStorage: remindedKeys），重启后当天不重复提醒。
+// P7.3 重复提醒扩展结构：{ date, ids, ts, stop }
+//   ts: { key: 上次提醒时间戳ms }（未处理事项按间隔再提醒用）
+//   stop: [key]（用户点「不再提醒」，当日对该事项静默）；旧结构无 ts/stop 字段兼容
 let remindedDate = '';
 let remindedKeys = new Set();
-(function loadRemindedKeys() {
+let remindTs = {};
+let remindStop = new Set();
+function loadRemindedKeys() {
   try {
     const o = JSON.parse(localStorage.getItem('remindedKeys') || '{}');
     const tk = dateKey(today());
-    if (o.date === tk && Array.isArray(o.ids)) { remindedKeys = new Set(o.ids); remindedDate = tk; }
+    if (o.date === tk && Array.isArray(o.ids)) {
+      remindedKeys = new Set(o.ids);
+      remindedDate = tk;
+      remindTs = (o.ts && typeof o.ts === 'object' && !Array.isArray(o.ts)) ? o.ts : {};
+      remindStop = new Set(Array.isArray(o.stop) ? o.stop : []);
+    }
   } catch { /* 损坏则当空 */ }
-})();
+}
+loadRemindedKeys();
 function saveRemindedKeys() {
-  localStorage.setItem('remindedKeys', JSON.stringify({ date: remindedDate, ids: [...remindedKeys] }));
+  localStorage.setItem('remindedKeys', JSON.stringify({ date: remindedDate, ids: [...remindedKeys], ts: remindTs, stop: [...remindStop] }));
 }
 function checkReminders() {
   const now = new Date();
   const tk = dateKey(now);
-  if (tk !== remindedDate) { remindedDate = tk; remindedKeys.clear(); }   // 跨日重置
+  if (tk !== remindedDate) { remindedDate = tk; remindedKeys.clear(); remindTs = {}; remindStop.clear(); }   // 跨日重置
   for (const ev of loadEvents()) {
     if (!ev.time) continue;
     // 当日有效性：重复事项按命中日判断 + 完成态查按日 override；普通事项按开始日期
@@ -3820,7 +3846,10 @@ function checkReminders() {
       continue;
     }
     const key = ev.id + '|' + tk;
-    if (remindedKeys.has(key)) continue;
+    if (remindedKeys.has(key)) {
+      maybeReRemind(ev, key, now);   // 已提醒未处理：按设置间隔再次提醒（P7.3）
+      continue;
+    }
     // 触发时间 = 到点时间 - 提前提醒分钟数
     const [h, m] = ev.time.split(':').map(Number);
     const trigger = new Date(now);
@@ -3832,6 +3861,7 @@ function checkReminders() {
     if (now.getTime() < trigger.getTime()) continue;   // 未到触发时间
     // 触发提醒
     remindedKeys.add(key);
+    remindTs[key] = now.getTime();   // 记录触发时间（重复提醒间隔用）
     saveRemindedKeys();
     // 清除已消费的贪睡标记
     if (ev.snoozeUntil) {
@@ -3849,6 +3879,41 @@ function checkReminders() {
     playChime(CHIME.remind);
     showReminderToast(ev, aheadMin);
   }
+}
+
+// ---- 重复提醒（P7.3）：已提醒未处理的事项按设置间隔再次提醒 ----
+// 停止条件：完成/贪睡/点「不再提醒」/当日结束；返回 true = 应再次提醒（纯判定，便于单测）
+function shouldReRemind(ev, key, now, repeatMin) {
+  if (!repeatMin || repeatMin <= 0) return false;      // 未开启重复提醒
+  if (remindStop.has(key)) return false;               // 用户已点「不再提醒」
+  const last = remindTs[key];
+  if (!last) return false;                             // 从未真正触发过（如贪睡跳过）不主动重复
+  if (now.getTime() - last < repeatMin * 60 * 1000) return false;   // 未到间隔
+  return now.getTime() <= reminderEndTimeMs(ev);       // 事件当日已结束则不再重复
+}
+// 事项提醒有效期的结束时刻（结束日 23:59:59；无日期信息视为不限）
+function reminderEndTimeMs(ev) {
+  const endKey = (ev && (ev.endDate || ev.date)) || '';
+  if (!endKey) return Infinity;
+  const d = parseDateKey(endKey);
+  if (!d || isNaN(d.getTime())) return Infinity;   // 非法日期（如 'bad'）视为不限
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+}
+// 重复提醒触发动作（checkReminders 主循环内调用；复用提醒链路：通知 + 响铃 + toast）
+function maybeReRemind(ev, key, now) {
+  const repeatMin = Number(loadAppSettings().remindRepeatMin) || 0;
+  if (!shouldReRemind(ev, key, now, repeatMin)) return;
+  remindTs[key] = now.getTime();   // 刷新上次提醒时间
+  saveRemindedKeys();
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      const n = new Notification('再次提醒', { body: `${ev.time} ${ev.title}（尚未处理）` });
+      n.onclick = () => { try { n.close(); } catch { /* 已关 */ } focusWindow(); gotoSearchResult(ev); };
+    }
+  } catch { /* 通知不可用时仅响铃 */ }
+  playChime(CHIME.remind);
+  showReminderToast(ev, 0);
 }
 
 // ============ iCal 互通（P4.3）：导出 .ics / 导入 .ics ============
@@ -5913,6 +5978,8 @@ function loadAppSettings() {
       autoSyncEnabled: false,      // 定时自动同步（P4.4，默认关；10 分钟间隔，需配合对端在线）
       autoBackupEnabled: true,     // 自动备份（P7.2，默认开；距上次成功备份超 20h 时写一份全量备份）
       lastAutoBackupAt: 0,         // 上次自动备份成功的时间戳（毫秒）
+      remindRepeatMin: 0,          // 重复提醒间隔分钟（P7.3，默认 0=不重复；10/30 可选）
+      remindAheadDefault: 0,       // 新建事项「提前提醒」默认值（P7.3，分钟）
       ...saved                     // 已有设置覆盖默认
     };
   } catch { return {}; }
@@ -6417,6 +6484,30 @@ function buildSettings(panel) {
         </span>
         <span class="set-switch"><input type="checkbox" class="set-remind-toast"><span class="set-slider"></span></span>
       </label>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">重复提醒</span>
+          <span class="set-desc">到点提醒后未处理的事项，间隔后再次提醒（完成/贪睡/不再提醒即停止）</span>
+        </span>
+        <select class="set-remind-repeat" title="重复提醒间隔">
+          <option value="0">不重复</option>
+          <option value="10">每 10 分钟</option>
+          <option value="30">每 30 分钟</option>
+        </select>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">默认提前提醒</span>
+          <span class="set-desc">新建事项时「提前提醒」的默认值，可按事项单独修改</span>
+        </span>
+        <select class="set-remind-ahead" title="默认提前提醒分钟数">
+          <option value="0">不提前</option>
+          <option value="5">5 分钟前</option>
+          <option value="10">10 分钟前</option>
+          <option value="15">15 分钟前</option>
+          <option value="30">30 分钟前</option>
+        </select>
+      </div>
       <label class="set-row">
         <span class="set-text">
           <span class="set-name">快捷键唤出侧边栏</span>
@@ -6570,6 +6661,28 @@ function buildSettings(panel) {
       s.reminderToastEnabled = remindToastSwitch.checked;
       saveAppSettings(s);
       showToast(remindToastSwitch.checked ? '应用内提醒条已开启' : '应用内提醒条已关闭（保留系统通知）');
+    });
+  }
+
+  // 重复提醒间隔 + 默认提前提醒（P7.3，即时保存生效）
+  const repeatSel = panel.querySelector('.set-remind-repeat');
+  if (repeatSel) {
+    repeatSel.value = String(Number(st.remindRepeatMin) || 0);
+    repeatSel.addEventListener('change', () => {
+      const s = loadAppSettings();
+      s.remindRepeatMin = Number(repeatSel.value) || 0;
+      saveAppSettings(s);
+      showToast(s.remindRepeatMin ? `重复提醒已开启（每 ${s.remindRepeatMin} 分钟）` : '重复提醒已关闭');
+    });
+  }
+  const aheadSel = panel.querySelector('.set-remind-ahead');
+  if (aheadSel) {
+    aheadSel.value = String(Number(st.remindAheadDefault) || 0);
+    aheadSel.addEventListener('change', () => {
+      const s = loadAppSettings();
+      s.remindAheadDefault = Number(aheadSel.value) || 0;
+      saveAppSettings(s);
+      showToast(s.remindAheadDefault ? `新建事项默认提前 ${s.remindAheadDefault} 分钟提醒` : '新建事项默认不提前提醒');
     });
   }
 

@@ -1149,7 +1149,7 @@ html, body {
   gap: 10px;
   pointer-events: auto;
 }
-.toast-snooze, .toast-done {
+.toast-snooze, .toast-done, .toast-stop {
   background: rgba(var(--accent-rgb), 0.3);
   border: 1px solid rgba(var(--accent-rgb), 0.6);
   color: #cfe4f7;
@@ -1159,7 +1159,7 @@ html, body {
   cursor: pointer;
   white-space: nowrap;
 }
-.toast-snooze:hover, .toast-done:hover { background: rgba(var(--accent-rgb), 0.5); }
+.toast-snooze:hover, .toast-done:hover, .toast-stop:hover { background: rgba(var(--accent-rgb), 0.5); }
 .toast-acts { display: inline-flex; gap: 6px; }
 /* 撤销删除提示条（P7.1）：带操作按钮时需要可交互 */
 .toast:has(.toast-act) { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
