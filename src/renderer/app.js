@@ -3628,6 +3628,7 @@ function bumpProjectRevision(pid) {
 }
 
 // 事项规范化快照（比较/导出用；date 由 startDate 派生，不参与比较）
+// P9.4：v2 起补 phaseId/tags/recur/remindAhead/pomoCount（v1 文件缺这些字段时读取端兜底）
 function normTaskSnap(t) {
   return {
     id: t.id,
@@ -3639,6 +3640,11 @@ function normTaskSnap(t) {
     category: t.category || 'work',
     urgency: t.urgency || 'normal',
     description: t.description || '',
+    phaseId: t.phaseId || '',
+    tags: Array.isArray(t.tags) ? [...t.tags] : [],
+    recur: t.recur || null,
+    remindAhead: t.remindAhead === undefined ? 0 : t.remindAhead,
+    pomoCount: Number(t.pomoCount) || 0,
     createdAt: t.createdAt || '',
     updatedAt: t.updatedAt || ''
   };
@@ -3660,21 +3666,26 @@ function snapshotProject(pid) {
       createdAt: p.createdAt || '', updatedAt: p.updatedAt || '',
       revision: p.revision || 1
     },
+    phases: JSON.parse(JSON.stringify(Array.isArray(p.phases) ? p.phases : [])),
     tasks: loadEvents().filter(e => e.projectId === pid).map(normTaskSnap)
   };
 }
 
-// 写入同步基准（snap = {revision, project, tasks} 的快照）
+// 写入同步基准（snap = {revision, project, phases?, tasks} 的快照）
 function setSyncBase(pid, snap) {
   const bases = loadSyncBases();
   bases[pid] = {
     revision: snap.revision || 1,
     exportedAt: snap.exportedAt || new Date().toISOString(),
     project: JSON.parse(JSON.stringify(snap.project)),
+    phases: JSON.parse(JSON.stringify(snap.phases || [])),
     tasks: JSON.parse(JSON.stringify(snap.tasks || []))
   };
   saveSyncBases(bases);
 }
+
+// .prj 文件格式版本：v2 = P9.4 起含 phases + 事项扩展字段；读取兼容 v1
+const PRJ_SCHEMA_VERSION = 2;
 
 // ---- 导出 .prj ----
 async function exportProjectFile(pid) {
@@ -3682,12 +3693,13 @@ async function exportProjectFile(pid) {
   if (!p) return;
   const snap = snapshotProject(pid);
   const payload = {
-    schema_version: 1,
+    schema_version: PRJ_SCHEMA_VERSION,
     kind: 'timetable-project',
     project_id: snap.project.id,
     revision: snap.revision,
     exported_at: snap.exportedAt,
     project: snap.project,
+    phases: snap.phases,
     tasks: snap.tasks
   };
   const content = JSON.stringify(payload, null, 2);
@@ -3749,6 +3761,7 @@ async function importProjectFileFlow() {
     addSyncLog('import-invalid', { pname: (data.project && data.project.name) || '', revision: data.revision, detail: fname ? `${fname}：${err}` : err });
     showToast('导入失败：' + err); return;
   }
+  normalizePrjPayload(data);   // v1 → v2 缺省补齐（phases/phaseId 等）
   addSyncLog('import-file', { pid: data.project_id, pname: data.project.name, revision: data.revision, detail: fname });
   openSyncPreview(data);
 }
@@ -3773,17 +3786,45 @@ function pickFileViaInput() {
   });
 }
 
+// 兼容 v1/v2：版本向前兼容（旧 v1 文件由 normalizePrjPayload 补齐新字段），未来高版本拒绝
 function validatePrjPayload(data) {
   if (!data || typeof data !== 'object') return '文件内容不是对象';
   if (data.kind !== 'timetable-project') return '不是本项目导出的项目文件（kind 不符）';
-  if (data.schema_version !== 1) return `不支持的文件版本（schema_version=${data.schema_version}）`;
+  const v = data.schema_version;
+  if (typeof v !== 'number' || v < 1) return `不支持的文件版本（schema_version=${v}）`;
+  if (v > PRJ_SCHEMA_VERSION) return `文件来自更新版本应用（schema_version=${v}），请先升级本应用`;
   if (!data.project_id || typeof data.project_id !== 'string') return '缺少 project_id';
   if (!data.project || typeof data.project !== 'object' || typeof data.project.name !== 'string') return 'project 数据缺失';
   if (!Array.isArray(data.tasks)) return 'tasks 必须是数组';
   for (const t of data.tasks) {
     if (!t || typeof t.id !== 'string' || typeof t.title !== 'string') return '存在缺少 id/title 的事项';
   }
+  if (v >= 2 && data.phases !== undefined && !Array.isArray(data.phases)) return 'phases 必须是数组';
+  if (v >= 2) {
+    for (const ph of (data.phases || [])) {
+      if (!ph || typeof ph.id !== 'string') return '阶段缺少稳定 id';
+      if (ph.name !== undefined && typeof ph.name !== 'string') return '阶段名称必须是字符串';
+    }
+  }
   return null;
+}
+
+// 就地把 v1 旧文件补齐为 v2 形态；v2 文件仅做缺省兜底。不删除任何字段
+function normalizePrjPayload(data) {
+  if (!Array.isArray(data.phases)) data.phases = [];
+  for (const ph of data.phases) {
+    ph.name = ph.name || '';
+    ph.order = Number(ph.order) || 0;
+    ph.startDate = ph.startDate || '';
+    ph.endDate = ph.endDate || '';
+  }
+  for (const t of data.tasks) {
+    if (t.phaseId === undefined || t.phaseId === null) t.phaseId = '';
+    if (!Array.isArray(t.tags)) t.tags = [];
+    if (t.recur === undefined) t.recur = null;
+    if (t.remindAhead === undefined) t.remindAhead = 0;
+    if (t.pomoCount === undefined) t.pomoCount = 0;
+  }
 }
 
 // ---- 三方合并引擎 ----
@@ -3804,11 +3845,12 @@ const SYNC_TASK_FIELDS = [
   { key: 'category',    label: '分类',     type: 'category' },
   { key: 'urgency',     label: '紧急程度', type: 'urgency' },
   { key: 'done',        label: '完成状态', type: 'done' },
-  { key: 'description', label: '备注',     type: 'text' }
+  { key: 'description', label: '备注',     type: 'text' },
+  { key: 'phaseId',     label: '所属阶段', type: 'text' }
 ];
 const TASK_FIELD_DEFAULTS = {
   title: '', time: '', startDate: '', endDate: '',
-  category: 'work', urgency: 'normal', done: false, description: ''
+  category: 'work', urgency: 'normal', done: false, description: '', phaseId: ''
 };
 
 function sameVal(a, b) { return String(a) === String(b); }
@@ -3938,6 +3980,7 @@ function resolveFieldValue(f) {
 }
 
 // 导入事项 → 本地事项对象（date 与 startDate 同步）
+// P9.4：补 phaseId/tags/recur/remindAhead/pomoCount；传入前应已 normalizePrjPayload
 function eventFromIncoming(t, pid, createdAtFallback) {
   const s = t.startDate || '';
   return {
@@ -3952,9 +3995,36 @@ function eventFromIncoming(t, pid, createdAtFallback) {
     urgency: t.urgency || 'normal',
     projectId: pid,
     description: t.description || '',
+    phaseId: t.phaseId || '',
+    tags: Array.isArray(t.tags) ? [...t.tags] : [],
+    recur: t.recur || null,
+    remindAhead: t.remindAhead === undefined ? 0 : t.remindAhead,
+    pomoCount: Number(t.pomoCount) || 0,
     createdAt: t.createdAt || createdAtFallback || new Date().toISOString(),
     updatedAt: t.updatedAt || ''
   };
+}
+
+// 阶段按 id 并集：同 id 以导入为准更新（仅覆盖提供的字段），本地新 id 保留，导入新 id 补入。
+// 不按名称匹配、不删除本地阶段（即使导入文件没有，也可能是旧版本导出或对方已删——删除不通过此通道传播）
+function mergeProjectPhases(project, incomingPhases) {
+  if (!Array.isArray(incomingPhases) || !incomingPhases.length) return;
+  const locals = Array.isArray(project.phases) ? project.phases : [];
+  const byId = new Map(locals.map(ph => [ph.id, ph]));
+  for (const ph of incomingPhases) {
+    if (!ph || !ph.id) continue;
+    const cur = byId.get(ph.id);
+    if (cur) {
+      cur.name = ph.name !== undefined ? ph.name : cur.name;
+      cur.order = ph.order !== undefined ? Number(ph.order) || 0 : cur.order;
+      cur.startDate = ph.startDate !== undefined ? ph.startDate : (cur.startDate || '');
+      cur.endDate = ph.endDate !== undefined ? ph.endDate : (cur.endDate || '');
+    } else {
+      locals.push({ id: ph.id, name: ph.name || '', order: Number(ph.order) || 0, startDate: ph.startDate || '', endDate: ph.endDate || '' });
+      byId.set(ph.id, locals[locals.length - 1]);
+    }
+  }
+  project.phases = locals;
 }
 
 // 应用合并结果（三方合并的写回）
@@ -3973,6 +4043,7 @@ function applySyncPlan() {
   }
   p.revision = Math.max(p.revision || 1, incoming.revision || 0, plan.baseRevision || 0) + 1;
   p.updatedAt = new Date().toISOString();
+  mergeProjectPhases(p, incoming.phases || []);   // P9.4 阶段并集
   saveProjects(projects);
 
   // 事项
@@ -4015,7 +4086,7 @@ function applySyncPlan() {
 
   // 关键：合并后的基准 = 导入文件快照（对方家系的上游），而非本地合并结果。
   // 这样对方下次导出的文件仍以同一祖先比较，本地独有内容不会被误判为"对方已删除"。
-  setSyncBase(pid, { revision: incoming.revision, exportedAt: incoming.exported_at, project: incoming.project, tasks: incoming.tasks });
+  setSyncBase(pid, { revision: incoming.revision, exportedAt: incoming.exported_at, project: incoming.project, phases: incoming.phases || [], tasks: incoming.tasks });
 
   const cfN = planConflictCount(plan);
   addSyncLog('merge', {
@@ -4044,6 +4115,7 @@ function applyImportNew() {
     category: ip.category || 'work',
     priority: ip.priority || 'medium',
     status: ip.status || 'active',
+    phases: JSON.parse(JSON.stringify(Array.isArray(incoming.phases) ? incoming.phases : [])),
     revision: incoming.revision || 1,
     createdAt: ip.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -4066,7 +4138,7 @@ function applyImportNew() {
   }
   saveEvents(all);
 
-  setSyncBase(pid, { revision: incoming.revision, exportedAt: incoming.exported_at, project: incoming.project, tasks: incoming.tasks });
+  setSyncBase(pid, { revision: incoming.revision, exportedAt: incoming.exported_at, project: incoming.project, phases: incoming.phases || [], tasks: incoming.tasks });
   expandedProjectId = pid;   // 导入后展开方便查看
   addSyncLog('import-new', { pid, pname: ip.name, revision: incoming.revision, detail: `${incoming.tasks.length} 个事项${remapCount ? `，${remapCount} 个 ID 冲突重编号` : ''}` });
   syncState = null;
@@ -4157,8 +4229,11 @@ function buildSummaryPanel(panel) {
 
   const body = document.createElement('div');
   body.className = 'sync-body';
+  if (Array.isArray(incoming.phases) && incoming.phases.length) {
+    body.innerHTML += `<div class="sync-line">阶段：将按 ID 合并（共 ${incoming.phases.length} 个；同 ID 以导入为准，新 ID 补入，本地阶段不删除）</div>`;
+  }
   if (planChangeCount(plan) === 0) {
-    body.innerHTML = `<div class="sync-line">导入内容与本地及同步基准一致，没有需要合并的变更。</div>`;
+    body.innerHTML += `<div class="sync-line">事项与项目信息无变更${Array.isArray(incoming.phases) && incoming.phases.length ? '（阶段仍会按上面的规则合并）' : '，没有需要合并的内容。'}</div>`;
   } else {
     if (plan.hasBase && incoming.revision < plan.baseRevision) {
       body.innerHTML += `<div class="sync-line warn">⚠ 导入文件版本（rev ${incoming.revision}）低于同步基准（rev ${plan.baseRevision}），请确认不是旧文件</div>`;
@@ -4366,7 +4441,7 @@ function buildImportNewPanel(panel) {
   const body = document.createElement('div');
   body.className = 'sync-body';
   body.innerHTML = `
-    <div class="sync-line add">＋ 将创建项目并导入其全部事项</div>
+    <div class="sync-line add">＋ 将创建项目并导入其全部事项${Array.isArray(incoming.phases) && incoming.phases.length ? `与 ${incoming.phases.length} 个阶段` : ''}</div>
     <div class="sync-line sub">${titles.length ? titles.map(escapeHtml).join('、') : '（无事项）'}</div>
     ${collisions.length ? `<div class="sync-line warn">⚠ ${collisions.length} 个事项 ID 与本地现有事项重复，导入时将重新编号，不会覆盖本地数据</div>` : ''}
   `;
@@ -7648,32 +7723,52 @@ function buildSettings(panel) {
       </div>
       <div class="set-row">
         <span class="set-text">
-          <span class="set-name">导出设置</span>
-          <span class="set-desc">偏好、番茄钟、排序等设备本地设置</span>
+          <span class="set-name">① 导出全部设置（.ttbk）</span>
+          <span class="set-desc">用途：迁移或恢复应用偏好。包含：提醒与声音、番茄钟、侧边栏/窗口偏好、排序与主题。不含任何密码、令牌、密钥，也不含业务数据；保存位置自选。</span>
         </span>
-        <button type="button" class="set-btn" data-backup="settings">导出</button>
+        <span class="autobackup-btns">
+          <button type="button" class="set-btn" data-backup="settings">导出</button>
+          <button type="button" class="set-btn" id="settingsImportBtn">导入</button>
+        </span>
       </div>
       <div class="set-row">
         <span class="set-text">
-          <span class="set-name">导出业务数据</span>
-          <span class="set-desc">项目、事项、便签等（不含本机偏好）</span>
+          <span class="set-name">② 导出项目文件（.prj）</span>
+          <span class="set-desc">用途：单项目分享与项目级同步。包含：所选项目、阶段 Phase、所属事项、优先级与日期。不含未归类事项及其他项目数据；导入保留稳定 ID、有冲突检测，不会无提示覆盖。</span>
         </span>
-        <button type="button" class="set-btn" data-backup="business">导出</button>
+        <span class="autobackup-btns prj-btns">
+          <select id="prjExportSelect" class="set-select" title="选择要导出的项目"></select>
+          <button type="button" class="set-btn" id="prjExportBtn">导出</button>
+          <button type="button" class="set-btn" id="prjImportBtn">导入</button>
+        </span>
       </div>
       <div class="set-row">
         <span class="set-text">
-          <span class="set-name">完整备份</span>
-          <span class="set-desc">业务数据 + 设置 + 剪贴板/UI 配置</span>
+          <span class="set-name">③ 导出完整备份（.ttbk）</span>
+          <span class="set-desc">用途：恢复整个应用的业务数据。包含：全部项目/阶段/事项、日历、便签、DailyLog、提醒配置与必要配置，另含侧边栏布局与剪贴板历史。明确排除：同步密钥 sync-secrets、订阅缓存、提醒账本、登录会话/令牌。恢复前校验格式与版本，整体恢复会覆盖现有数据。</span>
         </span>
-        <button type="button" class="set-btn" data-backup="full">备份</button>
-      </div>
-      <div class="set-row">
-        <span class="set-text">
-          <span class="set-name">导入备份</span>
-          <span class="set-desc">从 .ttbk 文件恢复（有冲突检测）</span>
+        <span class="autobackup-btns">
+          <button type="button" class="set-btn" data-backup="full">备份</button>
+          <button type="button" class="set-btn" id="fullRestoreBtn">恢复</button>
         </span>
-        <button type="button" class="set-btn" id="backupImportBtn">导入</button>
       </div>
+      <details class="set-adv">
+        <summary>高级：业务数据档 / 通用 .ttbk 导入</summary>
+        <div class="set-row">
+          <span class="set-text">
+            <span class="set-name">导出业务数据（.ttbk）</span>
+            <span class="set-desc">项目、阶段、事项、便签、模板、订阅定义等可跨设备合并的业务数据（不含本机偏好；导入为合并模式，不会覆盖本机设备 ID 与同步配对）</span>
+          </span>
+          <button type="button" class="set-btn" data-backup="business">导出</button>
+        </div>
+        <div class="set-row">
+          <span class="set-text">
+            <span class="set-name">从 .ttbk 文件导入</span>
+            <span class="set-desc">设置档：逐项预览后写入；业务档：冲突检测后合并；完整档：校验通过后整体恢复</span>
+          </span>
+          <button type="button" class="set-btn" id="backupImportBtn">导入</button>
+        </div>
+      </details>
       <div class="set-row">
         <span class="set-text">
           <span class="set-name">导出日历 (.ics)</span>
@@ -7982,59 +8077,130 @@ function buildSettings(panel) {
     });
   });
 
-  // ---- 备份导入（含冲突检测） ----
+  // ---- .ttbk 读取与按类型分发（完整恢复 / 设置预览 / 业务合并） ----
+  // expectType 可选：'settings' 时拒绝其他类型（专用设置导入入口）
+  async function readTtbkFile() {
+    const res = await window.timetable.backupImportDialog();
+    if (!res || !res.ok) {
+      if (res && res.error) showToast('读取失败：' + res.error);
+      return null;
+    }
+    let data;
+    try { data = JSON.parse(res.content); }
+    catch { showToast('备份文件格式损坏（JSON 解析失败）'); return null; }
+    const v = window.Backup.validateBackup(data);
+    if (!v.ok) { showToast(v.error); return null; }
+    return data;
+  }
+
+  async function restoreFullBackup(data, btn) {
+    const mf = window.Backup.backupManifest('full', !!(data.mainFiles));
+    const ok = confirm(
+      '完整备份恢复将整体覆盖当前所有数据（项目、阶段、事项、设置等），此操作不可撤销。\n\n' +
+      `备份内容（${mf.included.length} 项）：\n` + mf.included.slice(0, 8).map(s => '· ' + s).join('\n') +
+      (mf.included.length > 8 ? `\n· …另 ${mf.included.length - 8} 项` : '') +
+      '\n\n明确排除：\n' + mf.excluded.slice(0, 3).map(s => '· ' + s).join('\n') +
+      '\n\n恢复前会先校验全部数据，校验失败不会改动现有数据。是否继续？'
+    );
+    if (!ok) return;
+    const ret = window.Backup.applyFullReplace(data);
+    if (!ret.ok) { showToast('校验未通过，现有数据未改动：' + ret.error); return; }
+    if (data.mainFiles && window.timetable && window.timetable.backupSetMainFiles) {
+      try { await window.timetable.backupSetMainFiles(data.mainFiles); }
+      catch (e) { showToast('本机文件恢复失败：' + (e.message || e)); }
+    }
+    showToast('完整备份已恢复，正在刷新…');
+    setTimeout(() => { render(); window.location.reload(); }, 400);
+  }
+
+  async function mergeBusinessBackup(data) {
+    const plan = window.Backup.planImportConflicts(data);
+    let projectMode = 'overwrite', eventMode = 'overwrite';
+    const pj = plan.projects, ev = plan.events;
+    if (pj && pj.conflicts) {
+      const a = confirm(`项目有 ${pj.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。\n（如需跳过冲突项请在导入前手动处理）`);
+      projectMode = a ? 'overwrite' : 'keep';
+    }
+    if (ev && ev.conflicts) {
+      const a = confirm(`事项有 ${ev.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。`);
+      eventMode = a ? 'overwrite' : 'keep';
+    }
+    const ret = window.Backup.applyImport(data, { projectMode, eventMode });
+    invalidateDerivedCaches();   // applyImport 直写 localStorage，派生缓存统一失效（P6.3）
+    showToast('导入完成：' + (ret.logs.length ? ret.logs[0] : '无变化'));
+    render();
+  }
+
+  async function importSettingsBackup(data) {
+    const items = window.Backup.planSettingsImport(data);
+    const changing = items.filter(x => x.status !== 'same');
+    if (!changing.length) { showToast('设置与当前一致，无需导入'); return; }
+    const lines = changing.map(x => `· ${x.label}：${x.status === 'added' ? '本机没有，将新增' : '与本机不同，将覆盖'}`);
+    if (!confirm('将写入以下设置（不含任何密钥；设备专属窗口位置不包含在内）：\n\n' + lines.join('\n') + '\n\n写入后应用将自动刷新。是否继续？')) return;
+    window.Backup.applySettingsKeys(data, changing.map(x => x.key));
+    invalidateDerivedCaches();
+    showToast('设置已导入，正在刷新…');
+    setTimeout(() => { render(); window.location.reload(); }, 400);
+  }
+
+  // 通用 .ttbk 导入：按文件类型自动分发
+  async function runTtbkImport(btn, expectType) {
+    const oldText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '读取中…';
+    try {
+      const data = await readTtbkFile();
+      if (!data) return;
+      if (expectType && data.type !== expectType) {
+        showToast(`请选择${expectType === 'settings' ? '设置导出' : '对应类型'}的 .ttbk 文件（当前文件类型：${data.type}）`);
+        return;
+      }
+      if (data.type === 'full') await restoreFullBackup(data, btn);
+      else if (data.type === 'settings') await importSettingsBackup(data);
+      else await mergeBusinessBackup(data);
+    } catch (e) {
+      showToast('导入失败：' + (e && e.message || e));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  }
+
   const backupImportBtn = panel.querySelector('#backupImportBtn');
   if (backupImportBtn && window.timetable && window.timetable.backupImportDialog) {
-    backupImportBtn.addEventListener('click', async () => {
-      const oldText = backupImportBtn.textContent;
-      backupImportBtn.disabled = true;
-      backupImportBtn.textContent = '读取中…';
-      try {
-        const res = await window.timetable.backupImportDialog();
-        if (!res || !res.ok) {
-          if (res && res.error) showToast('读取失败：' + res.error);
-          return;
-        }
-        let data;
-        try { data = JSON.parse(res.content); }
-        catch { showToast('备份文件格式损坏（JSON 解析失败）'); return; }
-        const v = window.Backup.validateBackup(data);
-        if (!v.ok) { showToast(v.error); return; }
+    backupImportBtn.addEventListener('click', () => runTtbkImport(backupImportBtn, null));
+  }
+  const fullRestoreBtn = panel.querySelector('#fullRestoreBtn');
+  if (fullRestoreBtn && window.timetable && window.timetable.backupImportDialog) {
+    fullRestoreBtn.addEventListener('click', () => runTtbkImport(fullRestoreBtn, 'full'));
+  }
+  const settingsImportBtn = panel.querySelector('#settingsImportBtn');
+  if (settingsImportBtn && window.timetable && window.timetable.backupImportDialog) {
+    settingsImportBtn.addEventListener('click', () => runTtbkImport(settingsImportBtn, 'settings'));
+  }
 
-        if (data.type === 'full') {
-          if (!confirm('完整备份将覆盖当前所有数据（项目、事项、设置等），此操作不可撤销。是否继续？')) return;
-          window.Backup.applyFullReplace(data);
-          if (data.mainFiles && window.timetable && window.timetable.backupSetMainFiles) {
-            await window.timetable.backupSetMainFiles(data.mainFiles);
-          }
-          showToast('完整备份已恢复，正在刷新…');
-          setTimeout(() => { render(); window.location.reload(); }, 400);
-          return;
-        }
-
-        // settings / business：冲突检测
-        const plan = window.Backup.planImportConflicts(data);
-        let projectMode = 'overwrite', eventMode = 'overwrite';
-        const pj = plan.projects, ev = plan.events;
-        if (pj && pj.conflicts) {
-          const a = confirm(`项目有 ${pj.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。\n（如需跳过冲突项请在导入前手动处理）`);
-          projectMode = a ? 'overwrite' : 'keep';
-        }
-        if (ev && ev.conflicts) {
-          const a = confirm(`事项有 ${ev.conflicts} 条 ID 冲突。\n点击「确定」=覆盖本地，「取消」=保留两者（导入项加后缀）。`);
-          eventMode = a ? 'overwrite' : 'keep';
-        }
-        const ret = window.Backup.applyImport(data, { projectMode, eventMode });
-        invalidateDerivedCaches();   // applyImport 直写 localStorage，派生缓存统一失效（P6.3）
-        showToast('导入完成：' + (ret.logs.length ? ret.logs[0] : '无变化'));
-        render();
-      } catch (e) {
-        showToast('导入失败：' + (e && e.message || e));
-      } finally {
-        backupImportBtn.disabled = false;
-        backupImportBtn.textContent = oldText;
-      }
+  // ---- 项目文件（.prj）：下拉选择项目导出 + 导入 ----
+  const prjSelect = panel.querySelector('#prjExportSelect');
+  if (prjSelect) {
+    const projs = loadProjects();
+    if (!projs.length) {
+      prjSelect.innerHTML = '<option value="">（暂无项目）</option>';
+      prjSelect.disabled = true;
+    } else {
+      prjSelect.innerHTML = projs.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || '未命名项目')}</option>`).join('');
+    }
+  }
+  const prjExportBtn = panel.querySelector('#prjExportBtn');
+  if (prjExportBtn) {
+    prjExportBtn.addEventListener('click', async () => {
+      const pid = prjSelect && prjSelect.value;
+      if (!pid) { showToast('暂无可导出的项目'); return; }
+      await exportProjectFile(pid);
     });
+  }
+  const prjImportBtn = panel.querySelector('#prjImportBtn');
+  if (prjImportBtn) {
+    prjImportBtn.addEventListener('click', () => importProjectFileFlow());
   }
 
   // ---- iCal 导出/导入（P4.3） ----
@@ -8205,9 +8371,12 @@ function buildSettings(panel) {
           catch { showToast('备份文件格式损坏（JSON 解析失败）'); return; }
           const v = window.Backup.validateBackup(data);
           if (!v.ok) { showToast(v.error); return; }
-          window.Backup.applyFullReplace(data);
+          if (data.type !== 'full') { showToast('该文件不是完整备份（类型：' + data.type + '），请改用「导入」入口'); return; }
+          const ret = window.Backup.applyFullReplace(data);
+          if (!ret.ok) { showToast('校验未通过，现有数据未改动：' + ret.error); return; }
           if (data.mainFiles && window.timetable.backupSetMainFiles) {
-            await window.timetable.backupSetMainFiles(data.mainFiles);
+            try { await window.timetable.backupSetMainFiles(data.mainFiles); }
+            catch (e) { showToast('本机文件恢复失败：' + (e.message || e)); }
           }
           showToast('自动备份已恢复，正在刷新…');
           setTimeout(() => { render(); window.location.reload(); }, 400);
