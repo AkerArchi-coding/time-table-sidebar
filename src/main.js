@@ -471,6 +471,38 @@ ipcMain.handle('backup-import-dialog', async (e) => {
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
+// iCal 日历文件保存对话框（.ics，P4.3）
+ipcMain.handle('ical-export-dialog', async (e, { defaultName, content }) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: '导出日历',
+    defaultPath: defaultName || 'calendar.ics',
+    filters: [{ name: 'iCal 日历文件', extensions: ['ics'] }]
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  try {
+    await fs.promises.writeFile(filePath, content, 'utf8');
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+// iCal 日历文件打开对话框
+ipcMain.handle('ical-import-dialog', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '导入日历',
+    filters: [{ name: 'iCal 日历文件', extensions: ['ics'] }],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths || !filePaths[0]) return { ok: false, canceled: true };
+  try {
+    const content = await fs.promises.readFile(filePaths[0], 'utf8');
+    return { ok: true, path: filePaths[0], content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 
 // 查询 / 设置数据目录（userData）
 ipcMain.handle('data-dir-get', () => ({

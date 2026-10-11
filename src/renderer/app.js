@@ -2027,7 +2027,7 @@ function addEvent(fields, skipRender) {
     category: fields.category || 'work',
     urgency: fields.urgency || 'normal',
     projectId: fields.projectId || null,
-    description: '',
+    description: fields.description || '',
     recur: fields.recur || null,    // 重复规则（P3.2）：null = 不重复
     tags: Array.isArray(fields.tags) ? fields.tags : [],  // 标签（P3.3）
     createdAt: new Date().toISOString(),
@@ -3354,6 +3354,313 @@ function checkReminders() {
   }
 }
 
+// ============ iCal 互通（P4.3）：导出 .ics / 导入 .ics ============
+// 约定：本机浮点时间，不写 TZID/VTIMEZONE（与 app 内"时间即本地墙钟"语义一致，不做时区换算）；
+// 输出按 RFC 5545 用 CRLF 换行；导出不折叠长行（多数日历软件可读），导入支持行折叠展开。
+const ICAL_BYDAY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];  // getDay() → RFC 5545 星期码
+
+// ics 文本转义（SUMMARY/DESCRIPTION/CATEGORIES 值；反斜杠最先处理防二次转义）
+function icsEscape(s) {
+  return String(s || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r\n|\r|\n/g, '\\n');
+}
+// ics 文本反转义：单趟替换，避免「\\n（字面反斜杠+n）」被误展开为换行
+function icsUnescape(s) {
+  return String(s || '').replace(/\\n|\\,|\\;|\\\\/g, (m) => {
+    if (m === '\\n') return '\n';
+    if (m === '\\,') return ',';
+    if (m === '\\;') return ';';
+    return '\\';
+  });
+}
+// 'YYYY-MM-DD' → 'YYYYMMDD'
+function icsDate(key) { return String(key || '').replace(/-/g, ''); }
+// 'HH:MM' → 'HHMMSS'（异常格式兜底 000000）
+function icsTime(time) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(time || ''));
+  if (!m) return '000000';
+  return pad2(+m[1]) + m[2] + '00';
+}
+// 重复规则 → RRULE 值（不重复/未知返回 ''；weekly 的 BYDAY 取开始日星期码）
+function recurToRrule(recur, startKey) {
+  if (!recur || !recur.freq || recur.freq === 'none') return '';
+  const n = Math.max(1, parseInt(recur.interval, 10) || 1);
+  let rule = '';
+  if (recur.freq === 'daily') rule = 'FREQ=DAILY;INTERVAL=' + n;
+  else if (recur.freq === 'weekdays') rule = 'FREQ=WEEKLY;INTERVAL=' + n + ';BYDAY=MO,TU,WE,TH,FR';
+  else if (recur.freq === 'weekly') {
+    const d = parseDateKey(startKey) || new Date();
+    rule = 'FREQ=WEEKLY;INTERVAL=' + n + ';BYDAY=' + ICAL_BYDAY[d.getDay()];
+  } else if (recur.freq === 'monthly') rule = 'FREQ=MONTHLY;INTERVAL=' + n;
+  else return '';
+  if (recur.until) rule += ';UNTIL=' + icsDate(recur.until) + 'T235959';
+  return rule;
+}
+// RRULE 值 → 重复规则（无法映射返回 null；调用方需落"不重复 + 备注说明"）
+function rruleToRecur(rule, startKey) {
+  if (!rule) return null;
+  const parts = {};
+  for (const seg of String(rule).split(';')) {
+    const i = seg.indexOf('=');
+    if (i > 0) parts[seg.slice(0, i).toUpperCase()] = seg.slice(i + 1);
+  }
+  const freq = (parts.FREQ || '').toUpperCase();
+  const n = Math.max(1, parseInt(parts.INTERVAL, 10) || 1);
+  let freqKey = null;
+  if (freq === 'DAILY') freqKey = 'daily';
+  else if (freq === 'WEEKLY') {
+    const days = (parts.BYDAY || '').toUpperCase().split(',').map(s => s.trim()).filter(Boolean);
+    if (days.join(',') === 'MO,TU,WE,TH,FR') freqKey = 'weekdays';
+    else if (days.length === 1) freqKey = 'weekly';
+    // 其它 BYDAY 组合（如 MO,WE,FR）无法映射 → 落不重复
+  } else if (freq === 'MONTHLY') freqKey = 'monthly';
+  if (!freqKey) return null;
+  const recur = { freq: freqKey, interval: n, until: '' };
+  if (parts.UNTIL && /^\d{8}/.test(parts.UNTIL)) {
+    recur.until = parts.UNTIL.slice(0, 4) + '-' + parts.UNTIL.slice(4, 6) + '-' + parts.UNTIL.slice(6, 8);
+  }
+  return recur;   // weekly 的 BYDAY 由开始日星期码决定，导入时以 startKey 为准（与导出一致）
+}
+
+// 事项列表 → iCalendar 文本（每事项一个 VEVENT；now 参数仅供测试注入 DTSTAMP）
+function eventsToIcs(list, now) {
+  const stamp = now || new Date();
+  const dtStamp = stamp.getUTCFullYear() + pad2(stamp.getUTCMonth() + 1) + pad2(stamp.getUTCDate()) +
+    'T' + pad2(stamp.getUTCHours()) + pad2(stamp.getUTCMinutes()) + pad2(stamp.getUTCSeconds()) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Timetable001//日程侧边栏//CN'];
+  for (const ev of (list || [])) {
+    const sKey = eventStart(ev);
+    if (!sKey) continue;                        // 无开始日期的异常数据跳过
+    const eKey = eventEnd(ev) || sKey;
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + icsEscape(ev.id || String(stamp.getTime())) + '@timetable.local');
+    lines.push('DTSTAMP:' + dtStamp);
+    if (!ev.time) {
+      // 全天：DTSTART 含首日，DTEND 为结束日 +1（RFC 5545 全天区间非包含）
+      lines.push('DTSTART;VALUE=DATE:' + icsDate(sKey));
+      lines.push('DTEND;VALUE=DATE:' + icsDate(addDaysKey(eKey, 1)));
+    } else {
+      // 有时间：DTEND 与结束时刻相同（app 内结束时刻为包含语义，导出按同时刻落盘）
+      const t = icsTime(ev.time);
+      lines.push('DTSTART:' + icsDate(sKey) + 'T' + t);
+      lines.push('DTEND:' + icsDate(eKey) + 'T' + t);
+    }
+    lines.push('SUMMARY:' + icsEscape(ev.title || '（无标题）'));
+    // 分类与标签：中文分类标签放首位，tags 并入 CATEGORIES（导入时反向解析，备注不重复携带 tags）
+    const cat = CATEGORIES[ev.category];
+    const cats = [cat ? cat.label : ''].concat(Array.isArray(ev.tags) ? ev.tags : []).filter(Boolean);
+    if (cats.length) lines.push('CATEGORIES:' + icsEscape(cats.join(',')));
+    if (ev.description) lines.push('DESCRIPTION:' + icsEscape(ev.description));
+    if (ev.done) lines.push('STATUS:COMPLETED');
+    const rrule = recurToRrule(ev.recur, sKey);
+    if (rrule) lines.push('RRULE:' + rrule);
+    lines.push('END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n') + '\r\n';
+}
+
+// 解析 ics 日期值 → { date: 'YYYY-MM-DD', time: 'HH:MM' | '', allDay }
+// VALUE=DATE 或纯 8 位日期为全天；含 Z 后缀的 UTC 时间按本机墙钟直接采用（轻量化约定）
+function parseIcsDateVal(val, params) {
+  const v = String(val || '').trim();
+  let m = /^(\d{4})(\d{2})(\d{2})$/.exec(v);
+  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: '', allDay: true };
+  m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z?$/.exec(v);
+  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: pad2(+m[4]) + ':' + pad2(+m[5]), allDay: false };
+  if (/VALUE=DATE/i.test(params || '') && /^\d{8}/.test(v)) {
+    return { date: v.slice(0, 4) + '-' + v.slice(4, 6) + '-' + v.slice(6, 8), time: '', allDay: true };
+  }
+  return null;
+}
+
+// 解析出的 VEVENT 块 → 本地事项字段（缺 DTSTART 的块返回 null 丢弃）
+function normalizeIcsEvent(raw) {
+  const ds = raw._dtStart;
+  if (!ds) return null;
+  const de = raw._dtEnd;
+  let sKey = ds.date;
+  let eKey = (de && de.date) || ds.date;
+  if (ds.allDay && de && de.allDay && de.date > ds.date) {
+    eKey = addDaysKey(de.date, -1);             // 全天 DTEND 非包含 → 反推回包含式末日
+  } else if (!ds.allDay) {
+    eKey = (de && de.date) || ds.date;          // 有时间：DTEND 同结束时刻（跨天取结束日）
+  }
+  // 分类：CATEGORIES 中首个匹配中文标签的项 → category，其余项进 tags
+  let category = '';
+  const tags = [];
+  for (const t of raw.tags || []) {
+    const hit = Object.keys(CATEGORIES).find(k => CATEGORIES[k].label === t);
+    if (hit && !category) category = hit;
+    else if (!tags.includes(t)) tags.push(t);
+  }
+  let description = raw.description || '';
+  let recur = rruleToRecur(raw._rrule, sKey);
+  if (raw._rrule && !recur) {
+    // 不支持的重复规则：落不重复，规则原文追加进备注说明
+    recur = null;
+    description += (description ? '\n' : '') + `（原重复规则未支持导入：${raw._rrule}）`;
+  }
+  return {
+    title: raw.title || '（无标题）',
+    startDate: sKey,
+    endDate: eKey || sKey,
+    time: ds.allDay ? '' : (ds.time || ''),
+    category: category || 'work',
+    tags,
+    description,
+    done: !!raw.done,
+    recur
+  };
+}
+
+// .ics 文本 → 事项字段列表（CRLF/LF 归一 + RFC 5545 行折叠展开 + VEVENT 块扫描）
+function parseIcs(text) {
+  const raw = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const folded = [];
+  for (const line of raw.split('\n')) {
+    if ((line.startsWith(' ') || line.startsWith('\t')) && folded.length) {
+      folded[folded.length - 1] += line.slice(1);   // 续行：去掉首个空白拼接
+    } else {
+      folded.push(line);
+    }
+  }
+  const blocks = [];
+  let cur = null;
+  for (const line of folded) {
+    if (line === 'BEGIN:VEVENT') { cur = { tags: [] }; continue; }
+    if (line === 'END:VEVENT') {
+      if (cur) blocks.push(cur);
+      cur = null;
+      continue;
+    }
+    if (!cur || !line) continue;
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const head = line.slice(0, colon);
+    const val = line.slice(colon + 1);
+    const semi = head.indexOf(';');
+    const name = (semi < 0 ? head : head.slice(0, semi)).toUpperCase();
+    const params = semi < 0 ? '' : head.slice(semi + 1);
+    if (name === 'SUMMARY') cur.title = icsUnescape(val).trim();
+    else if (name === 'DESCRIPTION') cur.description = icsUnescape(val).trim();
+    else if (name === 'CATEGORIES') {
+      for (const c of icsUnescape(val).split(',')) {
+        const t = c.trim();
+        if (t) cur.tags.push(t);
+      }
+    } else if (name === 'STATUS' && val.trim().toUpperCase() === 'COMPLETED') cur.done = true;
+    else if (name === 'DTSTART') cur._dtStart = parseIcsDateVal(val, params);
+    else if (name === 'DTEND') cur._dtEnd = parseIcsDateVal(val, params);
+    else if (name === 'RRULE') cur._rrule = val.trim();
+  }
+  return blocks.map(normalizeIcsEvent).filter(Boolean);
+}
+
+// iCal 导入预览状态：[{ ev, checked, dup }]；dup = 与现有事项疑似重复（同标题/日期/时间）
+let icalImportItems = null;
+
+// ---- 工具：iCal 导入（选文件 → 预览勾选 → 选目标项目 → 导入） ----
+function buildIcalImport(panel) {
+  if (!icalImportItems) {
+    panel.innerHTML = `
+      <div class="tool-hint">从 .ics 日历文件导入事项：先选择文件预览，勾选后确认。</div>
+      <button type="button" class="set-btn ical-pick-btn">选择 .ics 文件…</button>
+      <div class="tool-hint ical-pick-err"></div>
+    `;
+    const pickBtn = panel.querySelector('.ical-pick-btn');
+    pickBtn.addEventListener('click', async () => {
+      if (!window.timetable || !window.timetable.icalImportDialog) return;
+      pickBtn.disabled = true;
+      try {
+        const res = await window.timetable.icalImportDialog();
+        if (!res || !res.ok) {
+          if (res && res.error) panel.querySelector('.ical-pick-err').textContent = '读取失败：' + res.error;
+          return;
+        }
+        const parsed = parseIcs(res.content);
+        if (!parsed.length) {
+          panel.querySelector('.ical-pick-err').textContent = '未在文件中找到可导入的事项';
+          return;
+        }
+        const existing = loadEvents();
+        icalImportItems = parsed.map(ev => ({
+          ev,
+          checked: true,
+          dup: existing.some(e => (e.title || '') === ev.title && eventStart(e) === ev.startDate && (e.time || '') === ev.time)
+        }));
+        render();   // currentTool 仍为 ical，重渲染出预览列表
+      } finally {
+        pickBtn.disabled = false;
+      }
+    });
+    return;
+  }
+
+  panel.innerHTML = `
+    <div class="tool-hint">共 ${icalImportItems.length} 条；标红的与现有事项疑似重复（同标题/日期/时间），导入时同项目下自动跳过。</div>
+    <div class="ical-list">
+      ${icalImportItems.map((it, i) => `
+        <label class="ical-item">
+          <input type="checkbox" data-idx="${i}" ${it.checked ? 'checked' : ''} />
+          <span class="ical-item-main">
+            <span class="ical-item-title">${escapeHtml(it.ev.title)}</span>
+            <span class="ical-item-sub">${it.ev.startDate}${it.ev.endDate && it.ev.endDate !== it.ev.startDate ? ' ~ ' + it.ev.endDate : ''}${it.ev.time ? ' ' + it.ev.time : ''}${it.ev.recur ? ' · ' + (RECUR_FREQ_LABELS[it.ev.recur.freq] || '重复') : ''}${it.ev.tags.length ? ' · #' + it.ev.tags.map(escapeHtml).join(' #') : ''}${it.dup ? ' · 疑似重复' : ''}</span>
+          </span>
+        </label>`).join('')}
+    </div>
+    <div class="qa-row">
+      <select class="ical-project" title="导入到项目">${projectOptionsHtml('')}</select>
+      <button type="button" class="set-btn ical-do-btn">导入</button>
+    </div>
+    <button type="button" class="set-btn ical-again">重新选择文件</button>
+  `;
+  panel.querySelectorAll('.ical-item input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const it = icalImportItems[+cb.dataset.idx];
+      if (it) it.checked = cb.checked;
+    });
+  });
+  panel.querySelector('.ical-again').addEventListener('click', () => {
+    icalImportItems = null;
+    render();
+  });
+  panel.querySelector('.ical-do-btn').addEventListener('click', () => {
+    const pid = panel.querySelector('.ical-project').value || null;
+    const existing = loadEvents();
+    let added = 0, skipped = 0;
+    for (const it of icalImportItems) {
+      if (!it.checked) continue;
+      const ev = it.ev;
+      // 去重：同项目 + 同标题 + 同开始日 + 同时间（与预览标注口径一致，另加项目维度）
+      const dup = existing.some(e =>
+        (e.title || '') === ev.title && eventStart(e) === ev.startDate &&
+        (e.time || '') === ev.time && (e.projectId || null) === pid);
+      if (dup) { skipped++; continue; }
+      addEvent({
+        title: ev.title,
+        startDate: ev.startDate,
+        endDate: ev.endDate,
+        time: ev.time,
+        category: ev.category,
+        urgency: 'normal',
+        projectId: pid,
+        recur: ev.recur,
+        tags: ev.tags,
+        description: ev.description
+      }, true);   // 批量导入，最后统一渲染
+      added++;
+    }
+    icalImportItems = null;
+    closeTool();
+    render();
+    showToast(`已导入 ${added} 条${skipped ? `，跳过重复 ${skipped} 条` : ''}`);
+  });
+}
+
 // ============ 侧边栏工具（快速添加 / 番茄钟 / 今日进度 / 快速便签） ============
 // 工具以「内容区覆盖层」呈现，不改 currentView，返回即回原视图；均为本地功能，不涉及网络。
 const TOOL_DEFS = {
@@ -3367,7 +3674,8 @@ const TOOL_DEFS = {
   sys:       { title: '系统资源', pinEditing: false },
   clipboard: { title: '剪贴板',   pinEditing: false },
   sync:      { title: '设备同步', pinEditing: false },
-  settings:  { title: '设置',     pinEditing: false }
+  settings:  { title: '设置',     pinEditing: false },
+  ical:      { title: 'iCal 导入', pinEditing: true }
 };
 
 function openTool(name) {
@@ -3404,6 +3712,7 @@ function renderTool() {
   else if (currentTool === 'clipboard') buildClipboard(panel);
   else if (currentTool === 'sync') buildSyncTool(panel);
   else if (currentTool === 'settings') buildSettings(panel);
+  else if (currentTool === 'ical') buildIcalImport(panel);
   weekList.appendChild(panel);
 }
 
@@ -5078,6 +5387,20 @@ function buildSettings(panel) {
         </span>
         <button type="button" class="set-btn" id="backupImportBtn">导入</button>
       </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">导出日历 (.ics)</span>
+          <span class="set-desc">全部事项导出为 iCal 日历文件，可导入日历软件</span>
+        </span>
+        <button type="button" class="set-btn" id="icalExportBtn">导出</button>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">导入日历 (.ics)</span>
+          <span class="set-desc">从 iCal 文件导入事项（先预览勾选）</span>
+        </span>
+        <button type="button" class="set-btn" id="icalImportBtn">导入</button>
+      </div>
     </div>
     <div class="set-group">
       <div class="set-group-title">设备同步</div>
@@ -5354,6 +5677,55 @@ function buildSettings(panel) {
       } finally {
         backupImportBtn.disabled = false;
         backupImportBtn.textContent = oldText;
+      }
+    });
+  }
+
+  // ---- iCal 导出/导入（P4.3） ----
+  const icalExportBtn = panel.querySelector('#icalExportBtn');
+  if (icalExportBtn) {
+    icalExportBtn.addEventListener('click', async () => {
+      const oldText = icalExportBtn.textContent;
+      icalExportBtn.disabled = true;
+      icalExportBtn.textContent = '导出中…';
+      try {
+        const ics = eventsToIcs(loadEvents());
+        const stamp = dateKey(today()).replace(/-/g, '');
+        const res = await window.timetable.icalExportDialog(`日程导出-${stamp}.ics`, ics);
+        if (res && res.ok) {
+          showToast('已导出到：' + res.path.split(/[\\/]/).slice(-1)[0]);
+        } else if (res && res.error) {
+          showToast('导出失败：' + res.error);
+        }
+      } catch (e) {
+        showToast('导出失败：' + (e && e.message || e));
+      } finally {
+        icalExportBtn.disabled = false;
+        icalExportBtn.textContent = oldText;
+      }
+    });
+  }
+  const icalImportBtn = panel.querySelector('#icalImportBtn');
+  if (icalImportBtn) {
+    icalImportBtn.addEventListener('click', async () => {
+      try {
+        if (!window.timetable || !window.timetable.icalImportDialog) return;
+        const res = await window.timetable.icalImportDialog();
+        if (!res || !res.ok) {
+          if (res && res.error) showToast('读取失败：' + res.error);
+          return;
+        }
+        const parsed = parseIcs(res.content);
+        if (!parsed.length) { showToast('未在文件中找到可导入的事项'); return; }
+        const existing = loadEvents();
+        icalImportItems = parsed.map(ev => ({
+          ev,
+          checked: true,
+          dup: existing.some(e => (e.title || '') === ev.title && eventStart(e) === ev.startDate && (e.time || '') === ev.time)
+        }));
+        openTool('ical');   // 进入预览面板
+      } catch (e) {
+        showToast('读取失败：' + (e && e.message || e));
       }
     });
   }

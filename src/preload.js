@@ -69,6 +69,9 @@ contextBridge.exposeInMainWorld('timetable', {
   backupSetMainFiles: (payload) => ipcRenderer.invoke('backup-set-main-files', payload),
   backupExportDialog: (defaultName, content) => ipcRenderer.invoke('backup-export-dialog', { defaultName, content }),
   backupImportDialog: () => ipcRenderer.invoke('backup-import-dialog'),
+  // iCal 互通（P4.3）：导出/导入 .ics 文件对话框
+  icalExportDialog: (defaultName, content) => ipcRenderer.invoke('ical-export-dialog', { defaultName, content }),
+  icalImportDialog: () => ipcRenderer.invoke('ical-import-dialog'),
   // 数据目录：查询当前路径 / 迁移到新目录（需重启）
   dataDirGet: () => ipcRenderer.invoke('data-dir-get'),
   dataDirMigrate: (backup) => ipcRenderer.invoke('data-dir-migrate', backup),

@@ -2377,3 +2377,31 @@ html, body {
 }
 .event-item.dragging { opacity: 0.35; }
 .day-card.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+
+/* ===== P4.3 iCal 导入预览面板 ===== */
+.ical-pick-btn { width: 100%; margin-top: 10px; }
+.ical-pick-err { color: var(--danger); }
+.ical-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+  max-height: 44vh;
+  overflow-y: auto;
+}
+.ical-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(var(--txt-rgb), 0.05);
+  cursor: pointer;
+}
+.ical-item:hover { background: rgba(var(--txt-rgb), 0.09); }
+.ical-item input[type="checkbox"] { margin-top: 3px; flex: none; }
+.ical-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ical-item-title { font-size: 13px; color: var(--txt); word-break: break-all; }
+.ical-item-sub { font-size: 11px; color: rgba(var(--txt-rgb), 0.55); word-break: break-all; }
+.ical-item.dup .ical-item-sub { color: var(--danger); }
+.ical-again { margin-top: 8px; width: 100%; }
