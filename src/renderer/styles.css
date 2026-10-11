@@ -2674,6 +2674,18 @@ html, body {
 }
 .calsub-status { font-size: 10px; color: rgba(var(--txt-rgb), 0.55); }
 .calsub-status.err { color: var(--danger); }
+/* P9.2：拉取失败但本地有旧缓存 → 过期警示（琥珀色，区别于彻底失败的红色） */
+.calsub-status.stale { color: #faad14; }
+.calsub-freq { display: inline-flex; align-items: center; }
+.calsub-freq select {
+  font-size: 10px;
+  padding: 1px 2px;
+  color-scheme: inherit;
+  color: var(--txt);
+  background: rgba(var(--txt-rgb), 0.06);
+  border: 1px solid rgba(var(--txt-rgb), 0.15);
+  border-radius: 3px;
+}
 .calsub-row .set-btn { flex: none; padding: 3px 8px; font-size: 11px; }
 .calsub-row .set-btn.danger { background: rgba(231, 76, 60, 0.18); color: #ff9d94; }
 .calsub-row .set-btn.danger:hover { background: rgba(231, 76, 60, 0.35); color: var(--txt); }
@@ -2695,6 +2707,13 @@ html, body {
   user-select: none;
 }
 .calsub-item.done .event-title { text-decoration: line-through; opacity: 0.6; }
+/* P9.2：已取消的外部事件（来源仍在推送，置灰+删除线提示，不物理隐藏） */
+.calsub-item.calsub-cancelled { opacity: 0.55; }
+.calsub-item.calsub-cancelled .event-title { text-decoration: line-through; }
+.calsub-cancel-badge {
+  border-color: rgba(250, 173, 20, 0.6) !important;
+  color: #faad14 !important;
+}
 .calsub-badge {
   flex: 0 0 auto;
   font-size: 9px;

@@ -131,7 +131,7 @@ test('iCal 导入：不支持 FREQ 落不重复 + 备注说明', () => {
   assert.ok(out[0].description.includes('FREQ=YEARLY'));
 });
 
-test('iCal 导入：外部文件（Z 后缀 UTC 时间按本机墙钟采用）', () => {
+test('iCal 导入：外部文件（P9.2 起 Z 后缀 UTC 时间转换为本地墙钟）', () => {
   const { sb } = loadApp();
   const ics = [
     'BEGIN:VCALENDAR',
@@ -155,8 +155,12 @@ test('iCal 导入：外部文件（Z 后缀 UTC 时间按本机墙钟采用）',
   const out = hostify(appEval(sb, `parseIcs(${JSON.stringify(ics)})`));
   assert.strictEqual(out.length, 1);
   assert.strictEqual(out[0].title, '站会');
-  assert.strictEqual(out[0].startDate, '2026-10-05');
-  assert.strictEqual(out[0].time, '01:30');           // 不做时区换算，字面采用
+  // UTC → 本机本地墙钟（应用"时间即本地墙钟"约定）；期望值按测试机时区动态计算
+  const d = new Date(Date.UTC(2026, 9, 5, 1, 30));
+  const pad = (n) => String(n).padStart(2, '0');
+  assert.strictEqual(out[0].startDate, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+  assert.strictEqual(out[0].time, `${pad(d.getHours())}:${pad(d.getMinutes())}`);
+  assert.strictEqual(out[0].tzid, 'UTC');
   assert.strictEqual(out[0].category, 'work');        // 中文标签「工作」→ work
   assert.deepStrictEqual(out[0].tags, ['例会']);       // 其余词作 tags
   assert.strictEqual(out[0].recur.freq, 'weekly');    // 单 BYDAY=MO → weekly

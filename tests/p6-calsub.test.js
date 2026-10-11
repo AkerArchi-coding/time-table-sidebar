@@ -85,11 +85,11 @@ test('getCalSubEventsByDate：重复订阅事项按日投影为只读复合 id',
   const { sb, storage } = loadApp();
   seedSubs(sb, storage, [SUB]);
   seedSubEvents(sb, storage, 'cs1', [
-    { title: '每日晨报', startDate: '2026-10-12', endDate: '2026-10-12', time: '08:00', recur: { freq: 'daily', interval: 1, until: '2026-10-15' } }
+    { uid: 'u-daily', title: '每日晨报', startDate: '2026-10-12', endDate: '2026-10-12', time: '08:00', recur: { freq: 'daily', interval: 1, until: '2026-10-15' } }
   ]);
   const d14 = hostify(appEval(sb, `getCalSubEventsByDate('2026-10-14')`));
   assert.strictEqual(d14.length, 1);
-  assert.strictEqual(d14[0].id, 'cs1#0@2026-10-14', '重复投影复合 id');
+  assert.strictEqual(d14[0].id, 'cs1#u-daily@2026-10-14', '重复投影复合 id（P9.2 起基于稳定 UID）');
   assert.strictEqual(d14[0].startDate, '2026-10-14');
   assert.strictEqual(d14[0]._subName, '公司日历');
   // until 之外不投影

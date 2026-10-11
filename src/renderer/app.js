@@ -258,11 +258,13 @@ function getEventsByDate(key) {
   return sorted;
 }
 
-// ============ 外部日历只读订阅（P6.4） ============
-// 订阅定义存 calSubscriptions：[{ id, name, url, enabled, lastSync, lastError }]（进三档备份，不进同步快照）；
-// 解析缓存存 calSubCache_{id}：{ syncedAt, events }（仅本机缓存，不进备份/同步）。
+// ============ 外部日历只读订阅（P6.4 / P9.2 增强） ============
+// 订阅定义存 calSubscriptions：[{ id, name, url, enabled, lastSync, lastError,
+//   providerType:'ics-url', refreshIntervalMin, etag, lastModified }]（进三档备份，不进同步快照）；
+// 解析缓存存 calSubCache_{id}：{ syncedAt, version:2, events }（仅本机缓存，不进备份/同步）。
 // 订阅事项以只读投影叠加到周/月视图：不落业务库，不参与勾选/删除/右键/拖拽/统计/提醒/批量/同步。
-const CAL_SUB_REFRESH_MS = 60 * 60 * 1000;   // 每小时自动刷新
+const CAL_SUB_TICK_MS = 5 * 60 * 1000;     // 定时检查粒度：每 5 分钟判断各订阅是否到期
+const CAL_SUB_INTERVAL_OPTS = [60, 180, 360, 1440, -1];   // 60/180/360 分钟、每天、仅手动
 let calSubsCache = null;
 const calSubEventsMemo = new Map();          // id → 解析后事项数组（避免月历 42 格重复 JSON.parse）
 
@@ -270,7 +272,15 @@ function loadCalSubs() {
   if (calSubsCache) return calSubsCache;
   try {
     const list = JSON.parse(localStorage.getItem('calSubscriptions') || '[]');
-    calSubsCache = Array.isArray(list) ? list.filter(s => s && s.id && s.url) : [];
+    const filtered = Array.isArray(list) ? list.filter(s => s && s.id && s.url) : [];
+    for (const s of filtered) {
+      // P9.2 迁移兜底
+      if (s.refreshIntervalMin === undefined || !CAL_SUB_INTERVAL_OPTS.includes(s.refreshIntervalMin)) s.refreshIntervalMin = 60;
+      if (s.etag === undefined) s.etag = '';
+      if (s.lastModified === undefined) s.lastModified = '';
+      if (!s.providerType) s.providerType = 'ics-url';
+    }
+    calSubsCache = filtered;
   } catch { calSubsCache = []; }
   return calSubsCache;
 }
@@ -280,19 +290,34 @@ function saveCalSubs(list) {
   catch (e) { notifyStorageFail(e); }
 }
 function calSubCacheKey(id) { return 'calSubCache_' + id; }
+// 读缓存原始包装（含 syncedAt/version）；无缓存或损坏返回 null
+function loadCalSubCacheRaw(id) {
+  try {
+    const o = JSON.parse(localStorage.getItem(calSubCacheKey(id)) || 'null');
+    if (o && Array.isArray(o.events)) return o;
+  } catch { /* 损坏缓存按无缓存处理 */ }
+  return null;
+}
 function loadCalSubEvents(id) {
   if (calSubEventsMemo.has(id)) return calSubEventsMemo.get(id);
   let evs = [];
-  try {
-    const o = JSON.parse(localStorage.getItem(calSubCacheKey(id)) || 'null');
-    if (o && Array.isArray(o.events)) evs = o.events;
-  } catch { evs = []; }
+  const o = loadCalSubCacheRaw(id);
+  if (o) {
+    evs = o.events;
+    // v1 缓存（无 version）事件可能缺 uid：当场按内容哈希补齐，不做一次性迁移脚本
+    for (const ev of evs) { if (!ev.uid) ev.uid = icsFallbackUid(ev); }
+  }
   calSubEventsMemo.set(id, evs);
   return evs;
 }
-function saveCalSubEvents(id, events) {
+function calSubSyncedAt(id) {
+  const o = loadCalSubCacheRaw(id);
+  return o ? (o.syncedAt || '') : '';
+}
+function saveCalSubEvents(id, events, syncedAt) {
   calSubEventsMemo.set(id, events);
-  try { localStorage.setItem(calSubCacheKey(id), JSON.stringify({ syncedAt: new Date().toISOString(), events })); }
+  const wrap = { syncedAt: syncedAt || new Date().toISOString(), version: 2, events };
+  try { localStorage.setItem(calSubCacheKey(id), JSON.stringify(wrap)); }
   catch (e) { notifyStorageFail(e); }
 }
 function removeCalSub(id) {
@@ -301,23 +326,71 @@ function removeCalSub(id) {
   try { localStorage.removeItem(calSubCacheKey(id)); } catch { /* 缓存清理失败无碍 */ }
 }
 
-// 某日订阅投影：enabled 订阅的缓存事项按覆盖日/重复规则投影；打 _subName 来源标记（只读）
+// 外部事件稳定身份：订阅 id + 事件 UID（同订阅内 RRULE 展开的重复事件仍是同一 key）
+function extEventKey(subId, ev) {
+  return subId + '#' + (ev.uid || icsFallbackUid(ev));
+}
+// 事件版本标识：sequence 优先，其次 updatedAt，再次内容哈希
+function extEventVersion(ev) {
+  if (ev.sequence) return 's' + ev.sequence;
+  if (ev.updatedAt) return 'u' + ev.updatedAt;
+  return 'c' + icsContentHash(ev);
+}
+// 新旧外部事件列表差异（纯函数，key 不含订阅前缀）：
+// { added:[key], updated:[key], removed:[key], cancelledKeys:[key] }
+function diffExtEvents(oldList, newList) {
+  const bareKey = (ev) => ev.uid || icsFallbackUid(ev);
+  const oldMap = new Map((oldList || []).map(ev => [bareKey(ev), ev]));
+  const newMap = new Map((newList || []).map(ev => [bareKey(ev), ev]));
+  const added = [], updated = [], removed = [], cancelledKeys = [];
+  for (const [key, ev] of newMap) {
+    if (ev.status === 'cancelled') cancelledKeys.push(key);
+    const old = oldMap.get(key);
+    if (!old) { added.push(key); continue; }
+    const changed = (ev.sequence || 0) !== (old.sequence || 0)
+      || (ev.updatedAt || '') !== (old.updatedAt || '')
+      || icsContentHash(ev) !== icsContentHash(old);
+    if (changed) updated.push(key);
+  }
+  for (const key of oldMap.keys()) {
+    if (!newMap.has(key)) removed.push(key);
+  }
+  return { added, updated, removed, cancelledKeys };
+}
+// 带订阅前缀的差异（刷新联动用）
+function diffSubExtEvents(subId, oldList, newList) {
+  const d = diffExtEvents(oldList, newList);
+  const pre = (k) => subId + '#' + k;
+  return {
+    added: d.added.map(pre),
+    updated: d.updated.map(pre),
+    removed: d.removed.map(pre),
+    cancelledKeys: d.cancelledKeys.map(pre)
+  };
+}
+
+// 某日订阅投影：enabled 订阅的缓存事项按覆盖日/重复规则投影；打 _subName/_extKey 来源标记（只读）
+// 已取消事件仍投影（置灰显示"已取消"），不做物理隐藏，避免用户错过取消通知
 function getCalSubEventsByDate(key) {
   const out = [];
   for (const sub of loadCalSubs()) {
     if (!sub.enabled) continue;
     const evs = loadCalSubEvents(sub.id);
-    for (let i = 0; i < evs.length; i++) {
-      const ev = evs[i];
+    for (const ev of evs) {
+      const baseKey = extEventKey(sub.id, ev);
+      const cancelled = ev.status === 'cancelled';
       if (isRecurOn(ev)) {
         if (recurMatchesDate(ev.recur, eventStart(ev), key)) {
-          out.push({ ...ev, id: sub.id + '#' + i + '@' + key, date: key, startDate: key, endDate: key, _subName: sub.name });
+          out.push({ ...ev, id: baseKey + '@' + key, date: key, startDate: key, endDate: key,
+            _subName: sub.name, _subId: sub.id, _extKey: baseKey, _cancelled: cancelled });
         }
       } else {
         const s = eventStart(ev);
         if (!s) continue;
         const e = eventEnd(ev) || s;
-        if (s <= key && key <= e) out.push({ ...ev, id: sub.id + '#' + i, _subName: sub.name });
+        if (s <= key && key <= e) {
+          out.push({ ...ev, id: baseKey, _subName: sub.name, _subId: sub.id, _extKey: baseKey, _cancelled: cancelled });
+        }
       }
     }
   }
@@ -332,14 +405,46 @@ function mkCalSubId() {
   return 'cs' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-// 拉取并刷新单个订阅（就地更新 sub.lastSync/lastError；成功重写缓存）。返回是否成功。
+// 订阅是否到期应自动刷新（refreshIntervalMin=-1 仅手动；无 lastSync 立即到期）
+function calSubDue(sub, nowMs) {
+  const min = Number(sub.refreshIntervalMin);
+  if (!Number.isFinite(min) || min < 0) return false;
+  if (!sub.lastSync) return true;
+  const last = Date.parse(sub.lastSync);
+  if (!Number.isFinite(last)) return true;
+  return (nowMs || Date.now()) - last >= min * 60000;
+}
+function calSubIntervalLabel(min) {
+  return ({ 60: '每 1 小时', 180: '每 3 小时', 360: '每 6 小时', 1440: '每天', [-1]: '仅手动' })[min] || '每 1 小时';
+}
+// 订阅状态文案：失败但本地仍有缓存 → 明确标记"数据可能过期"；从未成功 → 错误
+function calSubStatusInfo(s) {
+  const fmt = (iso) => iso ? iso.slice(0, 16).replace('T', ' ') : '';
+  if (s.lastError) {
+    const cached = calSubSyncedAt(s.id);
+    if (cached) return { cls: 'stale', text: `数据可能过期（上次成功同步 ${fmt(cached)}）：${s.lastError}` };
+    return { cls: 'err', text: '同步失败：' + s.lastError };
+  }
+  return { cls: '', text: s.lastSync ? '同步于 ' + fmt(s.lastSync) : '尚未同步' };
+}
+
+// 拉取并刷新单个订阅（就地更新 sub.lastSync/lastError/etag/lastModified；成功才覆盖缓存）。
+// 始终带条件头；304 保留缓存与 lastSync（返回 true）。网络/解析失败保留旧缓存。
 async function calSubRefreshOne(sub) {
   if (!window.timetable || !window.timetable.calSubFetch) { sub.lastError = '当前环境不支持订阅'; return false; }
   try {
-    const res = await window.timetable.calSubFetch(sub.url);
+    const res = await window.timetable.calSubFetch(sub.url, { etag: sub.etag || '', lastModified: sub.lastModified || '' });
     if (res && res.ok) {
-      saveCalSubEvents(sub.id, parseIcs(res.content));
-      sub.lastSync = new Date().toISOString();
+      if (res.etag) sub.etag = res.etag;
+      if (res.lastModified) sub.lastModified = res.lastModified;
+      if (!res.notModified) {
+        const oldEvs = loadCalSubEvents(sub.id);
+        const evs = parseIcs(res.content || '');
+        saveCalSubEvents(sub.id, evs);
+        sub.lastSync = new Date().toISOString();
+        onCalSubEventsReplaced(sub, oldEvs, evs);   // P9.3 提醒账本联动钩子
+      }
+      // 304 / 200 都说明订阅仍可访问：清除错误标记（旧缓存保留）
       sub.lastError = '';
       return true;
     }
@@ -349,13 +454,17 @@ async function calSubRefreshOne(sub) {
   }
   return false;
 }
+// 订阅事件被成功替换后的差异联动（P9.2 空实现，P9.3 接入提醒账本清理；刷新主流程不依赖 P9.3）
+function onCalSubEventsReplaced(/* sub, oldEvs, newEvs */) {}
 
-// 刷新全部启用订阅；silent 时不打断用户（仅在无工具/表单打开时补一次重绘）
-async function calSubRefreshAll(silent) {
-  const subs = loadCalSubs().filter(s => s.enabled);
+// 刷新订阅；manual=true 刷新所有启用订阅（忽略频率），否则只刷新到期订阅。
+// silent 时不打断用户（仅在无工具/表单打开时补一次重绘）
+async function calSubRefreshAll(silent, manual) {
+  const now = Date.now();
+  const subs = loadCalSubs().filter(s => s.enabled && (manual || calSubDue(s, now)));
   if (!subs.length) return;
   for (const s of subs) await calSubRefreshOne(s);
-  saveCalSubs(loadCalSubs());   // 持久化 lastSync/lastError（引用已就地更新）
+  saveCalSubs(loadCalSubs());   // 持久化 lastSync/lastError/etag（引用已就地更新）
   if (!silent) { render(); return; }
   if (windowVisible && !currentTool &&
       !document.querySelector('.add-form:not(.hidden), .project-form:not(.hidden), .editor-block')) {
@@ -363,21 +472,24 @@ async function calSubRefreshAll(silent) {
   }
 }
 
-// 周视图订阅条目（只读）：无勾选/删除/右键/拖拽，点击 toast 详情
+// 周视图订阅条目（只读）：无勾选/删除/右键/拖拽；P9.3 起点击打开详情浮层
 function buildCalSubItem(ev) {
   const cat = CATEGORIES[ev.category] || CATEGORIES.work;
   const item = document.createElement('div');
-  item.className = 'calsub-item' + (ev.done ? ' done' : '');
+  item.className = 'calsub-item' + (ev.done ? ' done' : '') + (ev._cancelled ? ' calsub-cancelled' : '');
   item.style.borderLeftColor = cat.color;
+  const cancelTag = ev._cancelled ? '<span class="calsub-badge calsub-cancel-badge">已取消</span>' : '';
   item.innerHTML = `
     <span class="event-time">${escapeHtml(ev.time || '')}</span>
     <span class="calsub-badge" title="来自订阅「${escapeHtml(ev._subName || '')}」">订阅</span>
+    ${cancelTag}
     <span class="event-title">${escapeHtml(ev.title)}</span>
   `;
   const rng = ev.endDate && ev.endDate !== ev.startDate ? `${ev.startDate} ~ ${ev.endDate}` : (ev.startDate || '');
   item.title = `${ev.title}\n${rng}${ev.time ? ' ' + ev.time : ''}${ev.description ? '\n' + ev.description : ''}\n—— 来自订阅「${ev._subName || ''}」（只读）`;
   item.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (typeof openCalEventDetail === 'function') { openCalEventDetail(ev); return; }
     showToast(`订阅事项（只读）：${ev.title}　${rng}${ev.time ? ' ' + ev.time : ''}`);
   });
   return item;
@@ -4441,21 +4553,73 @@ function eventsToIcs(list, now) {
   return lines.join('\r\n') + '\r\n';
 }
 
-// 解析 ics 日期值 → { date: 'YYYY-MM-DD', time: 'HH:MM' | '', allDay }
-// VALUE=DATE 或纯 8 位日期为全天；含 Z 后缀的 UTC 时间按本机墙钟直接采用（轻量化约定）
+// 解析 ics 日期值 → { date: 'YYYY-MM-DD', time: 'HH:MM' | '', allDay, tzid }
+// VALUE=DATE 或纯 8 位日期为全天；Z 结尾 UTC 时间转换为本地墙钟（应用"时间即本地墙钟"约定）；
+// 浮动时间与 TZID 时间按本地处理，TZID 仅原样记录（无 tzdata，不做时区换算）
 function parseIcsDateVal(val, params) {
   const v = String(val || '').trim();
+  const tzidM = /TZID=([^;:]+)/i.exec(params || '');
+  const tzid = tzidM ? tzidM[1].replace(/^"|"$/g, '') : '';
   let m = /^(\d{4})(\d{2})(\d{2})$/.exec(v);
-  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: '', allDay: true };
-  m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z?$/.exec(v);
-  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: pad2(+m[4]) + ':' + pad2(+m[5]), allDay: false };
+  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: '', allDay: true, tzid: '' };
   if (/VALUE=DATE/i.test(params || '') && /^\d{8}/.test(v)) {
-    return { date: v.slice(0, 4) + '-' + v.slice(4, 6) + '-' + v.slice(6, 8), time: '', allDay: true };
+    return { date: v.slice(0, 4) + '-' + v.slice(4, 6) + '-' + v.slice(6, 8), time: '', allDay: true, tzid: '' };
+  }
+  m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/.exec(v);
+  if (m) {
+    if (m[7]) {
+      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
+      return {
+        date: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
+        time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()), allDay: false, tzid: 'UTC'
+      };
+    }
+    return { date: `${m[1]}-${m[2]}-${m[3]}`, time: pad2(+m[4]) + ':' + pad2(+m[5]), allDay: false, tzid };
   }
   return null;
 }
 
-// 解析出的 VEVENT 块 → 本地事项字段（缺 DTSTART 的块返回 null 丢弃）
+// ICS UTC 时间戳（CREATED/LAST-MODIFIED/DTSTAMP）→ ISO 字符串；无法解析返回 ''
+function icsStampToIso(val) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z?$/.exec(String(val || '').trim());
+  if (!m) return '';
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))).toISOString();
+}
+
+// VALARM TRIGGER 负向 DURATION → 提前分钟数（-PT15M→15，-PT1H30M→90，-P1D→1440，-PT0D→0）；
+// 绝对触发时间（VALUE=DATE-TIME）与正向/无法识别的格式返回 null
+function parseIcsTriggerMinutes(val) {
+  const s = String(val || '').trim().toUpperCase();
+  if (!s.startsWith('-')) return null;
+  const body = s.slice(1);
+  if (body === 'PT0D' || body === 'P0D') return 0;   // 宽容：部分源把零时长写成 -PT0D
+  const m = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(body);
+  if (!m) return null;
+  const weeks = +(m[1] || 0), days = +(m[2] || 0), hours = +(m[3] || 0), mins = +(m[4] || 0);
+  if (!weeks && !days && !hours && !mins) return 0;   // -PT0D / -P0D
+  return weeks * 7 * 24 * 60 + days * 24 * 60 + hours * 60 + mins;
+}
+
+// 外部事件稳定身份兜底：UID 缺失时用内容字段哈希（djb2，base36）
+function icsFallbackUid(ev) {
+  const basis = [ev.title, ev.startDate, ev.endDate, ev.time, ev.allDay ? 'd' : 't'].join('|');
+  let h = 5381;
+  for (let i = 0; i < basis.length; i++) { h = ((h << 5) + h + basis.charCodeAt(i)) >>> 0; }
+  return 'h:' + h.toString(36);
+}
+
+// 外部事件内容版本哈希：sequence/updatedAt 之外的字段级变更兜底判定（FNV-1a，base36）
+function icsContentHash(ev) {
+  const basis = [ev.title, ev.startDate, ev.endDate, ev.time, ev.allDay ? 1 : 0, ev.location || '',
+    ev.description || '', ev.status || '', ev.remindAhead === null ? '' : ev.remindAhead,
+    ev.recur ? JSON.stringify(ev.recur) : ''].join('');
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < basis.length; i++) { h ^= basis.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
+// 解析出的 VEVENT 块 → 外部事件字段（缺 DTSTART 的块返回 null 丢弃）
+// 注意：文件导入为 Task 的出口只挑 Task 字段，下列外部字段（uid/status/…）不会写入业务库
 function normalizeIcsEvent(raw) {
   const ds = raw._dtStart;
   if (!ds) return null;
@@ -4482,17 +4646,28 @@ function normalizeIcsEvent(raw) {
     recur = null;
     description += (description ? '\n' : '') + `（原重复规则未支持导入：${raw._rrule}）`;
   }
-  return {
+  const ev = {
+    uid: String(raw.uid || '').trim(),
     title: raw.title || '（无标题）',
+    description,
+    location: raw.location || '',
     startDate: sKey,
     endDate: eKey || sKey,
     time: ds.allDay ? '' : (ds.time || ''),
+    allDay: !!ds.allDay,
+    tzid: ds.tzid || '',
+    status: String(raw.status || '').toUpperCase() === 'CANCELLED' ? 'cancelled' : 'confirmed',
+    sequence: Number.isFinite(raw.sequence) ? raw.sequence : 0,
+    createdAt: raw.createdAt || '',
+    updatedAt: raw.updatedAt || '',
     category: category || 'work',
     tags,
-    description,
     done: !!raw.done,
-    recur
+    recur,
+    remindAhead: (raw.remindAhead === undefined || raw.remindAhead === null) ? null : raw.remindAhead
   };
+  if (!ev.uid) ev.uid = icsFallbackUid(ev);
+  return ev;
 }
 
 // .ics 文本 → 事项字段列表（CRLF/LF 归一 + RFC 5545 行折叠展开 + VEVENT 块扫描）
@@ -4508,11 +4683,15 @@ function parseIcs(text) {
   }
   const blocks = [];
   let cur = null;
+  let inAlarm = false;
   for (const line of folded) {
-    if (line === 'BEGIN:VEVENT') { cur = { tags: [] }; continue; }
+    if (line === 'BEGIN:VEVENT') { cur = { tags: [] }; inAlarm = false; continue; }
+    if (line === 'BEGIN:VALARM') { inAlarm = true; continue; }
+    if (line === 'END:VALARM') { inAlarm = false; continue; }
     if (line === 'END:VEVENT') {
       if (cur) blocks.push(cur);
       cur = null;
+      inAlarm = false;
       continue;
     }
     if (!cur || !line) continue;
@@ -4523,19 +4702,41 @@ function parseIcs(text) {
     const semi = head.indexOf(';');
     const name = (semi < 0 ? head : head.slice(0, semi)).toUpperCase();
     const params = semi < 0 ? '' : head.slice(semi + 1);
+    // VALARM 内只取 TRIGGER（其他行不覆盖事件本体）；只支持事件开始前的负向 DURATION
+    if (inAlarm) {
+      if (name === 'TRIGGER' && cur.remindAhead === undefined) {
+        const mins = parseIcsTriggerMinutes(val);
+        if (mins !== null) cur.remindAhead = mins;
+      }
+      continue;
+    }
     if (name === 'SUMMARY') cur.title = icsUnescape(val).trim();
     else if (name === 'DESCRIPTION') cur.description = icsUnescape(val).trim();
+    else if (name === 'LOCATION') cur.location = icsUnescape(val).trim();
+    else if (name === 'UID') cur.uid = icsUnescape(val).trim();
+    else if (name === 'SEQUENCE') { const n = parseInt(val.trim(), 10); if (Number.isFinite(n)) cur.sequence = n; }
+    else if (name === 'CREATED') cur.createdAt = icsStampToIso(val);
+    else if (name === 'LAST-MODIFIED') cur.updatedAt = icsStampToIso(val);
+    else if (name === 'DTSTAMP') cur.dtstamp = icsStampToIso(val);
+    else if (name === 'STATUS') {
+      const st = val.trim().toUpperCase();
+      cur.status = st;
+      if (st === 'COMPLETED') cur.done = true;
+    }
     else if (name === 'CATEGORIES') {
       for (const c of icsUnescape(val).split(',')) {
         const t = c.trim();
         if (t) cur.tags.push(t);
       }
-    } else if (name === 'STATUS' && val.trim().toUpperCase() === 'COMPLETED') cur.done = true;
-    else if (name === 'DTSTART') cur._dtStart = parseIcsDateVal(val, params);
+    } else if (name === 'DTSTART') cur._dtStart = parseIcsDateVal(val, params);
     else if (name === 'DTEND') cur._dtEnd = parseIcsDateVal(val, params);
     else if (name === 'RRULE') cur._rrule = val.trim();
   }
-  return blocks.map(normalizeIcsEvent).filter(Boolean);
+  return blocks.map(b => {
+    if (!b.updatedAt && b.dtstamp) b.updatedAt = b.dtstamp;
+    if (!b.createdAt && b.dtstamp) b.createdAt = b.dtstamp;
+    return normalizeIcsEvent(b);
+  }).filter(Boolean);
 }
 
 // iCal 导入预览状态：[{ ev, checked, dup }]；dup = 与现有事项疑似重复（同标题/日期/时间）
@@ -4551,26 +4752,33 @@ function buildIcalImport(panel) {
       <div class="tool-hint ical-pick-err"></div>
       <div class="calsub-block">
         <div class="calsub-title">外部日历订阅（只读）</div>
-        <div class="tool-hint">粘贴 .ics 订阅地址，事项叠加到周/月视图；不进统计/批量/同步，每小时自动刷新。</div>
+        <div class="tool-hint">粘贴标准 iCalendar（.ics）订阅地址，事项叠加到周/月视图；不进统计/批量/同步，按各自频率自动刷新（ETag 条件请求，源未变更不重复下载）。</div>
         <div class="qa-row">
           <input type="text" class="calsub-url" placeholder="https://…/calendar.ics" spellcheck="false" />
           <button type="button" class="set-btn calsub-add-btn">添加</button>
         </div>
         <div class="tool-hint calsub-add-err"></div>
         <div class="calsub-list">
-          ${subs.length === 0 ? '<div class="tool-hint">暂无订阅</div>' : subs.map(s => `
+          ${subs.length === 0 ? '<div class="tool-hint">暂无订阅</div>' : subs.map(s => {
+            const st = calSubStatusInfo(s);
+            const opts = [60, 180, 360, 1440, -1].map(m =>
+              `<option value="${m}"${s.refreshIntervalMin === m ? ' selected' : ''}>${calSubIntervalLabel(m)}</option>`).join('');
+            return `
             <div class="calsub-row" data-id="${s.id}">
               <input type="checkbox" class="calsub-enabled" ${s.enabled ? 'checked' : ''} title="启用/停用" />
               <span class="calsub-main">
                 <span class="calsub-name">${escapeHtml(s.name)}</span>
                 <span class="calsub-url-text" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</span>
-                <span class="calsub-status${s.lastError ? ' err' : ''}">${s.lastError
-                  ? '同步失败：' + escapeHtml(s.lastError)
-                  : (s.lastSync ? '同步于 ' + escapeHtml(s.lastSync.slice(0, 16).replace('T', ' ')) : '尚未同步')}</span>
+                <span class="calsub-status ${st.cls}">${escapeHtml(st.text)}</span>
+                <span class="calsub-freq">
+                  <select class="calsub-interval" title="自动刷新频率">${opts}</select>
+                </span>
               </span>
               <button type="button" class="set-btn calsub-refresh" title="立即刷新">刷新</button>
+              <button type="button" class="set-btn calsub-edit" title="编辑名称/地址">编辑</button>
               <button type="button" class="set-btn danger calsub-del" title="删除订阅及其缓存">删除</button>
-            </div>`).join('')}
+            </div>`;
+          }).join('')}
         </div>
       </div>
     `;
@@ -4611,7 +4819,8 @@ function buildIcalImport(panel) {
       errEl.textContent = '';
       addBtn.disabled = true;
       try {
-        const sub = { id: mkCalSubId(), name: calSubNameFromUrl(url), url, enabled: true, lastSync: '', lastError: '' };
+        const sub = { id: mkCalSubId(), name: calSubNameFromUrl(url), url, enabled: true,
+          lastSync: '', lastError: '', providerType: 'ics-url', refreshIntervalMin: 60, etag: '', lastModified: '' };
         const ok = await calSubRefreshOne(sub);
         if (!ok) { errEl.textContent = '添加失败：' + (sub.lastError || '拉取失败'); return; }
         saveCalSubs([...loadCalSubs(), sub]);
@@ -4629,6 +4838,42 @@ function buildIcalImport(panel) {
         sub.enabled = !!e.target.checked;
         saveCalSubs(loadCalSubs());
         render();   // 启停影响周/月视图叠加，整体重绘
+      });
+      // P9.2：自动刷新频率
+      row.querySelector('.calsub-interval').addEventListener('change', (e) => {
+        const min = parseInt(e.target.value, 10);
+        if (CAL_SUB_INTERVAL_OPTS.includes(min)) {
+          sub.refreshIntervalMin = min;
+          saveCalSubs(loadCalSubs());
+          showToast(min === -1 ? `「${sub.name}」改为仅手动刷新` : `「${sub.name}」自动刷新：${calSubIntervalLabel(min)}`);
+        }
+      });
+      // P9.2：编辑名称/地址（地址变更后清空条件请求缓存并立即重拉）
+      row.querySelector('.calsub-edit').addEventListener('click', async () => {
+        const newName = prompt('订阅名称：', sub.name);
+        if (newName === null) return;
+        const trimmedName = newName.trim();
+        if (trimmedName) sub.name = trimmedName;
+        const newUrl = prompt('订阅地址（http(s):// 开头的 .ics）：', sub.url);
+        if (newUrl === null) { saveCalSubs(loadCalSubs()); render(); return; }
+        const u = newUrl.trim();
+        if (!/^https?:\/\//i.test(u)) { showToast('订阅地址需以 http(s):// 开头', 'error'); return; }
+        if (u !== sub.url) {
+          if (loadCalSubs().some(x => x.id !== sub.id && x.url === u)) { showToast('该地址已订阅', 'error'); return; }
+          sub.url = u;
+          sub.etag = '';
+          sub.lastModified = '';
+          sub.lastSync = '';
+          sub.lastError = '';
+          saveCalSubs(loadCalSubs());
+          const ok = await calSubRefreshOne(sub);
+          saveCalSubs(loadCalSubs());
+          showToast(ok ? `「${sub.name}」已更新并刷新` : `「${sub.name}」地址已更新，但刷新失败：${sub.lastError}`, ok ? '' : 'error');
+        } else {
+          saveCalSubs(loadCalSubs());
+          showToast(`「${sub.name}」已更新`);
+        }
+        render();
       });
       const refBtn = row.querySelector('.calsub-refresh');
       refBtn.addEventListener('click', async () => {
@@ -8263,9 +8508,9 @@ setInterval(() => {
 // 天气：启动拉取一次，之后每 10 分钟刷新（窄条温度直显）；窗口隐藏时不请求
 refreshWeather();
 setInterval(() => { if (windowVisible) refreshWeather(); }, 10 * 60 * 1000);
-// 外部日历订阅（P6.4）：启动补刷一次（如备份恢复后无缓存），之后每小时静默自动刷新
+// 外部日历订阅（P6.4/P9.2）：启动补刷到期订阅，之后每 5 分钟检查各订阅频率是否到期
 calSubRefreshAll(true).catch(() => {});
-setInterval(() => { calSubRefreshAll(true).catch(() => {}); }, CAL_SUB_REFRESH_MS);
+setInterval(() => { calSubRefreshAll(true).catch(() => {}); }, CAL_SUB_TICK_MS);
 // 系统资源窄条读数：展开态 2s / 收起态 15s 自适应采样（主进程每次采样需 busy-wait 220ms，
 // 收起时 3s 常驻是无谓开销；工具面板打开时由 buildSys 自己的 2s 定时器负责）。
 // 窗口隐藏进托盘时不采样（窄条不可见），仅以 30s 空转保活，重新显示时由 onWindowVisible 立即补采。

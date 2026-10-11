@@ -739,15 +739,25 @@ function requestJson(url, timeoutMs = 7000) {
   });
 }
 
-// ============ 外部日历订阅（P6.4）：拉取 .ics 文本（与 requestJson 同套设施，仅解析不同） ============
-function requestText(url, timeoutMs = 10000, redirects = 0) {
+// ============ 外部日历订阅（P6.4/P9.2）：拉取 .ics 文本（条件请求 ETag/Last-Modified） ============
+// 返回 { content, etag, lastModified }；304 时返回 { notModified:true, etag, lastModified }
+function requestText(url, timeoutMs = 10000, redirects = 0, condHeaders = null) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('https:') ? https : http;
-    const req = lib.get(url, { headers: { 'User-Agent': 'timetable-desktop/1.0' } }, (res) => {
+    const headers = Object.assign({ 'User-Agent': 'timetable-desktop/1.0' }, condHeaders || {});
+    const req = lib.get(url, { headers }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (redirects >= 5) { reject(new Error('重定向次数过多')); return; }
-        requestText(res.headers.location, timeoutMs, redirects + 1).then(resolve, reject);
+        // 跟随重定向时不带条件头（跨主机重定向回源更稳）
+        requestText(res.headers.location, timeoutMs, redirects + 1, null).then(resolve, reject);
+        return;
+      }
+      const etag = res.headers.etag || '';
+      const lastModified = res.headers['last-modified'] || '';
+      if (res.statusCode === 304) {
+        res.resume();
+        resolve({ notModified: true, etag, lastModified });
         return;
       }
       if (res.statusCode !== 200) {
@@ -763,19 +773,24 @@ function requestText(url, timeoutMs = 10000, redirects = 0) {
         if (size > 5 * 1024 * 1024) { req.destroy(new Error('日历文件过大（>5MB）')); return; }   // 防御异常大响应
         raw += c;
       });
-      res.on('end', () => resolve(raw));
+      res.on('end', () => resolve({ content: raw, etag, lastModified }));
     });
     req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
     req.on('error', reject);
   });
 }
-// 拉取订阅 URL 的 .ics 原文；协议白名单 + 错误文案化（渲染层只负责解析）
-ipcMain.handle('cal-sub-fetch', async (_e, url) => {
+// 拉取订阅 URL 的 .ics 原文；协议白名单 + 条件请求 + 错误文案化（渲染层只负责解析）
+// opts: { etag, lastModified } → 带 If-None-Match / If-Modified-Since；源未变更返回 notModified
+ipcMain.handle('cal-sub-fetch', async (_e, url, opts) => {
   const u = String(url || '').trim();
   if (!/^https?:\/\//i.test(u)) return { ok: false, error: '订阅地址需以 http(s):// 开头' };
+  const cond = {};
+  if (opts && opts.etag) cond['If-None-Match'] = String(opts.etag);
+  if (opts && opts.lastModified) cond['If-Modified-Since'] = String(opts.lastModified);
   try {
-    const content = await requestText(u, 10000);
-    return { ok: true, content };
+    const r = await requestText(u, 10000, 0, Object.keys(cond).length ? cond : null);
+    if (r.notModified) return { ok: true, notModified: true, etag: r.etag || (opts && opts.etag) || '', lastModified: r.lastModified || (opts && opts.lastModified) || '' };
+    return { ok: true, content: r.content, etag: r.etag || '', lastModified: r.lastModified || '' };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
