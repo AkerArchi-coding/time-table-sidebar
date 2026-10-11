@@ -2725,3 +2725,28 @@ html, body {
   white-space: nowrap;
 }
 .kbd-desc { color: rgba(var(--txt-rgb), 0.85); }
+
+/* ===== P7.5 年热力图（统计面板底部区块） ===== */
+/* 容器横向滚动适配窄宽度；网格列=周（周一起），行=周一~周日 */
+.hm-scroll { overflow-x: auto; padding-bottom: 4px; }
+.hm-grid { display: flex; gap: 3px; width: max-content; }
+.hm-col { display: flex; flex-direction: column; gap: 3px; }
+.hm-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: rgba(var(--txt-rgb), 0.08);   /* 0 档：近无活动 */
+}
+.hm-l1 { background: rgba(var(--accent-rgb), 0.25); }
+.hm-l2 { background: rgba(var(--accent-rgb), 0.45); }
+.hm-l3 { background: rgba(var(--accent-rgb), 0.7); }
+.hm-l4 { background: var(--accent); }
+.hm-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.5);
+}
+.hm-legend .hm-cell { width: 10px; height: 10px; }

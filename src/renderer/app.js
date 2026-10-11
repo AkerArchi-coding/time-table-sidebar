@@ -5118,6 +5118,33 @@ function weekCompare(events, history, now) {
   }
   return { done, created, focusMinutes: fm, prev: { done: pDone, created: pCreated, focusMinutes: pfm } };
 }
+
+// 年热力图（P7.5 纯函数）：GitHub 风格周对齐网格，53 列（周）× 7 行（周一~周日）
+// daily: buildStats().daily（连续日期升序，缺失日安全为 0）；metric: 'done' | 'focusMinutes'
+// 网格终点固定为 endKey 所在周的周日，向前铺满 371 格 → 覆盖 ≥365 天，首列可能前导空档（值 0）
+// 返回 { cells: [{date, value, level, col, row}], cols, rows, max }；level 0~4 五档色阶
+function buildHeatmap(daily, metric, endKey) {
+  const map = new Map((daily || []).map(d => [d.date, d]));
+  const end = parseDateKey(endKey) || new Date();
+  const endSunday = addDays(end, 6 - ((end.getDay() + 6) % 7));   // 所在周的周日（周一为一周之首）
+  const cells = [];
+  let max = 0;
+  for (let i = 0; i < 371; i++) {
+    const k = dateKey(addDays(endSunday, i - 370));
+    const rec = map.get(k);
+    const v = rec ? Math.max(0, Number(rec[metric]) || 0) : 0;
+    if (v > max) max = v;
+    cells.push({ date: k, value: v, col: Math.floor(i / 7), row: i % 7 });
+  }
+  // 分档：0 → 0 档；峰值 ≤4 时按值直接映射（低活跃也有梯度），否则按峰值比例分 4 段
+  for (const c of cells) {
+    if (!c.value) { c.level = 0; continue; }
+    if (max <= 4) { c.level = c.value; continue; }
+    const t = c.value / max;
+    c.level = t > 0.75 ? 4 : t > 0.5 ? 3 : t > 0.25 ? 2 : 1;
+  }
+  return { cells, cols: 53, rows: 7, max };
+}
 // 周报 Markdown：本周（周一~周日）完成事项按项目分组 + 专注汇总 + 每日完成条形
 function buildWeeklyReport(events, projects, history, now) {
   now = now || new Date();
@@ -5170,6 +5197,7 @@ function buildWeeklyReport(events, projects, history, now) {
 // ---- 统计工具面板 ----
 let statsRangeDays = 7;   // 统计区间：7 | 30
 let statsTrendMode = 'focus';   // 趋势卡数据列：focus（专注分钟）| done（完成事项）（P5.1）
+let statsHmMode = 'done';   // 年热力图口径：done（完成事项）| focusMinutes（专注分钟）（P7.5）
 function buildStatsPanel(panel) {
   const now = today();
   const st = buildStats(loadEvents(), loadPomoHistory(), statsRangeDays, now);
@@ -5203,6 +5231,17 @@ function buildStatsPanel(panel) {
   const todayTasks = [...taskAgg.values()].sort((a, b) => b.minutes - a.minutes).slice(0, 3);
   // 本周 vs 上周（P5.1）
   const wc = weekCompare(loadEvents(), loadPomoHistory(), now);
+  // 年热力图（P7.5）：近 53 周网格，口径随 statsHmMode 切换
+  const hm = buildHeatmap(buildStats(loadEvents(), loadPomoHistory(), 371, now).daily, statsHmMode, dateKey(now));
+  const hmUnit = statsHmMode === 'done' ? ' 项完成' : ' 分钟专注';
+  const hmGrid = (() => {
+    const cols = [];
+    for (let c = 0; c < hm.cols; c++) {
+      cols.push(`<div class="hm-col">${hm.cells.filter(x => x.col === c).map(x =>
+        `<div class="hm-cell hm-l${x.level}" title="${x.date}：${x.value}${hmUnit}"></div>`).join('')}</div>`);
+    }
+    return cols.join('');
+  })();
   const cmpRow = (label, cur, pv, unit) => {
     const diff = cur - pv;
     const arrow = pv <= 0
@@ -5308,6 +5347,17 @@ function buildStatsPanel(panel) {
         <button type="button" class="notes-btn stat-export-week">导出 .md</button>
       </div>
     </div>
+    <div class="stat-card">
+      <div class="stat-card-title">近一年活跃热力图<span class="stat-card-sub">近 53 周</span></div>
+      <div class="stat-toolbar">
+        <div class="stat-range">
+          <button type="button" class="stat-range-btn" data-hm="done">完成事项</button>
+          <button type="button" class="stat-range-btn" data-hm="focusMinutes">专注分钟</button>
+        </div>
+      </div>
+      <div class="hm-scroll"><div class="hm-grid">${hmGrid}</div></div>
+      <div class="hm-legend">少<span class="hm-cell hm-l0"></span><span class="hm-cell hm-l1"></span><span class="hm-cell hm-l2"></span><span class="hm-cell hm-l3"></span><span class="hm-cell hm-l4"></span>多</div>
+    </div>
   `;
 
   // 区间切换：重绘本面板（按 data-r 作用域，避免误绑趋势切换按钮）
@@ -5326,6 +5376,17 @@ function buildStatsPanel(panel) {
     btn.addEventListener('click', () => {
       if (statsTrendMode === btn.dataset.trend) return;
       statsTrendMode = btn.dataset.trend;
+      panel.innerHTML = '';
+      buildStatsPanel(panel);
+    });
+  });
+
+  // 热力图口径切换（P7.5）：完成事项 / 专注分钟
+  panel.querySelectorAll('[data-hm]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.hm === statsHmMode);
+    btn.addEventListener('click', () => {
+      if (statsHmMode === btn.dataset.hm) return;
+      statsHmMode = btn.dataset.hm;
       panel.innerHTML = '';
       buildStatsPanel(panel);
     });
