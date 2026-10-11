@@ -28,7 +28,10 @@ function fakeEl(tag) {
   const qsCache = {};
   const el = {
     tagName: String(tag || 'div').toUpperCase(),
-    dataset: {}, style: {}, children: [],
+    dataset: {},
+    // style 桩：支持直接属性赋值（style.width=…）+ setProperty 记录（CSS 变量注入断言用）
+    style: { _sets: {}, setProperty(k, v) { this._sets[k] = v; }, removeProperty() {} },
+    children: [],
     innerHTML: '', textContent: '', value: '', className: '',
     scrollLeft: 0, scrollTop: 0, clientWidth: 200, clientHeight: 200,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },

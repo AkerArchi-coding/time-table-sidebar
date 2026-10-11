@@ -5,6 +5,7 @@ const os = require('os');
 const https = require('https');
 const http = require('http');
 const koffi = require('koffi');
+const { resolveLaunchExe } = require('./main/launch-path');
 const { spawn } = require('child_process');
 
 let sidebar = null;            // 侧边栏主窗口
@@ -842,7 +843,7 @@ ipcMain.on('autostart-set', (_e, on) => {
     app.setLoginItemSettings({
       openAtLogin: !!on,
       openAsHidden: !!on,          // 仅 macOS 生效，Windows 自动忽略
-      path: process.execPath,
+      path: resolveLaunchExe(process.execPath, process.env),   // 便携版用真实 exe 路径（见 launch-path.js）
       args: []
     });
   } catch { /* 个别环境（便携目录权限等）设置失败时静默 */ }
@@ -1021,6 +1022,14 @@ function openSettingsFromTray() {
   expandSidebar();
   sidebar.webContents.send('tray-action', { action: 'settings' });
 }
+
+// 通知点击直达（P4.1）：唤起窗口并展开侧栏，渲染层随后定位具体事项
+ipcMain.on('show-window', () => {
+  if (!sidebar || sidebar.isDestroyed()) return;
+  fullscreenHidden = false;
+  if (!sidebar.isVisible()) sidebar.show();
+  expandSidebar();
+});
 
 // 托盘菜单"退出"：真正结束进程（close 钩子对 isQuiting 放行）
 function quitApp() {

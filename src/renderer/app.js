@@ -3165,7 +3165,9 @@ function checkReminders() {
     }
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        new Notification('日程提醒', { body: `${ev.time} ${ev.title}${aheadMin > 0 ? `（提前 ${aheadMin} 分钟）` : ''}` });
+        // 点击通知：唤起窗口并直达该事项（定位所在周 + 打开编辑）
+        const n = new Notification('日程提醒', { body: `${ev.time} ${ev.title}${aheadMin > 0 ? `（提前 ${aheadMin} 分钟）` : ''}` });
+        n.onclick = () => { try { n.close(); } catch { /* 已关 */ } focusWindow(); gotoSearchResult(ev); };
       }
     } catch { /* 通知不可用时仅响铃 */ }
     playChime(CHIME.remind);
@@ -3392,7 +3394,11 @@ function pomoEnterBreak() {
 }
 function pomoNotify(title, body) {
   try {
-    if (Notification.permission === 'granted') new Notification(title, { body });
+    if (Notification.permission === 'granted') {
+      // 点击通知仅唤起窗口（番茄钟完成无具体事项定位语义）
+      const n = new Notification(title, { body });
+      n.onclick = () => { try { n.close(); } catch { /* 已关 */ } focusWindow(); };
+    }
     else showToast(title + '：' + body);
   } catch { showToast(title + '：' + body); }
 }
@@ -3851,6 +3857,14 @@ function gotoSearchResult(ev) {
     switchView('tasks');
   }
   openTaskEditor(ev);
+}
+
+// 通知点击直达（P4.1）：唤起窗口并展开侧栏（主进程负责显示，失败静默——通知本身已可见）
+function focusWindow() {
+  try {
+    if (window.timetable && window.timetable.showWindow) { window.timetable.showWindow(); return true; }
+  } catch { /* 主进程不支持时忽略 */ }
+  return false;
 }
 
 function buildSearchPanel(panel) {
@@ -4730,6 +4744,40 @@ if (window.timetable && window.timetable.onSyncExchangeRequest) {
   });
 }
 
+// ============ 外观主题（P4.1）：暗色默认 / 亮色 body.light + 强调色色板 ============
+// 强调色三件套（--accent / --accent-rgb / --accent-txt）注入 documentElement，两主题通用
+const ACCENT_PALETTE = [
+  { id: 'blue',   accent: '#4a90d9', accentRgb: '74, 144, 217',  light: '#8fc1ee' },
+  { id: 'teal',   accent: '#3aa8a0', accentRgb: '58, 168, 160',  light: '#8fd8d2' },
+  { id: 'purple', accent: '#9b7ede', accentRgb: '155, 126, 222', light: '#c9b8f2' },
+  { id: 'orange', accent: '#e08e3c', accentRgb: '224, 142, 60',  light: '#f2c290' },
+  { id: 'green',  accent: '#5cab5e', accentRgb: '92, 171, 94',   light: '#a8dcaa' }
+];
+function loadUiTheme() {
+  try {
+    const o = JSON.parse(localStorage.getItem('uiTheme') || '{}');
+    return {
+      mode: o.mode === 'light' ? 'light' : 'dark',
+      accent: ACCENT_PALETTE.some(p => p.id === o.accent) ? o.accent : 'blue'
+    };
+  } catch { return { mode: 'dark', accent: 'blue' }; }
+}
+function applyUiTheme() {
+  const t = loadUiTheme();
+  document.body.classList.toggle('light', t.mode === 'light');
+  const p = ACCENT_PALETTE.find(x => x.id === t.accent) || ACCENT_PALETTE[0];
+  const rs = document.documentElement.style;
+  rs.setProperty('--accent', p.accent);
+  rs.setProperty('--accent-rgb', p.accentRgb);
+  rs.setProperty('--accent-txt', p.light);
+}
+function saveUiTheme(patch) {
+  const t = Object.assign(loadUiTheme(), patch);
+  if (!ACCENT_PALETTE.some(p => p.id === t.accent)) t.accent = 'blue';   // 写入前校验，防任意值入库
+  try { localStorage.setItem('uiTheme', JSON.stringify(t)); } catch { /* 存储满则仅本次生效 */ }
+  applyUiTheme();
+}
+
 function buildSettings(panel) {
   panel.innerHTML = `
     <div class="set-group">
@@ -4754,6 +4802,26 @@ function buildSettings(panel) {
           <option value="mini">迷你 Dock（半高）</option>
           <option value="hidden">完全隐藏</option>
         </select>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-group-title">外观</div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">主题</span>
+          <span class="set-desc">亮色 / 暗色，切换即时生效</span>
+        </span>
+        <span class="set-seg">
+          <button type="button" class="seg-btn theme-mode-btn" data-mode="dark">暗色</button>
+          <button type="button" class="seg-btn theme-mode-btn" data-mode="light">亮色</button>
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">强调色</span>
+          <span class="set-desc">按钮、选中态的主色调</span>
+        </span>
+        <span class="accent-dots" id="accentDots"></span>
       </div>
     </div>
     <div class="set-group">
@@ -4920,6 +4988,33 @@ function buildSettings(panel) {
     if (window.timetable) window.timetable.autostartSet(autoSwitch.checked);
     showToast(autoSwitch.checked ? '已开启开机自动启动' : '已关闭开机自动启动');
   });
+
+  // ---- 外观：主题亮暗 + 强调色色板（saveUiTheme 内部即时生效并持久化） ----
+  const themeT = loadUiTheme();
+  const themeBtns = panel.querySelectorAll('.theme-mode-btn');
+  themeBtns.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === themeT.mode);
+    btn.addEventListener('click', () => {
+      saveUiTheme({ mode: btn.dataset.mode });
+      themeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === btn.dataset.mode));
+    });
+  });
+  const dotsWrap = panel.querySelector('#accentDots');
+  if (dotsWrap) {
+    ACCENT_PALETTE.forEach(p => {
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.className = 'accent-dot' + (p.id === themeT.accent ? ' active' : '');
+      dot.style.background = p.accent;
+      dot.title = p.id;
+      dot.setAttribute('aria-label', '强调色 ' + p.id);
+      dot.addEventListener('click', () => {
+        saveUiTheme({ accent: p.id });
+        dotsWrap.querySelectorAll('.accent-dot').forEach(d => d.classList.toggle('active', d === dot));
+      });
+      dotsWrap.appendChild(dot);
+    });
+  }
 
   // ---- 侧边栏：停靠位置 / 显示模式（主进程持有配置，切换即时生效） ----
   const sideBtns = panel.querySelectorAll('.seg-btn[data-side]');
@@ -5446,6 +5541,8 @@ if (window.timetable) {
 // ============ 初始化 ============
 // 生成本机设备标识（局域网同步预留）
 getDeviceId();
+// 应用外观主题（暗/亮 + 强调色）：渲染前生效，避免启动闪色
+applyUiTheme();
 // 上报主进程（配对/同步握手复用同一 deviceId）
 if (window.timetable && window.timetable.syncHello) {
   try { window.timetable.syncHello(getDeviceId()); } catch { /* 主进程未就绪时下次启动再报 */ }

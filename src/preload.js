@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld('timetable', {
   appVersion: () => ipcRenderer.invoke('app-version'),
   autostartGet: () => ipcRenderer.invoke('autostart-get'),
   autostartSet: (on) => ipcRenderer.send('autostart-set', on),
+  // 通知点击直达：唤起窗口并展开侧栏（主进程处理显示与几何）
+  showWindow: () => ipcRenderer.send('show-window'),
   // 托盘动作：主进程 → 渲染层（如托盘菜单"设置"）
   onTrayAction: (cb) => {
     const handler = (_e, data) => cb(data);
