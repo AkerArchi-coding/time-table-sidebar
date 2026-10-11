@@ -1161,6 +1161,44 @@ html, body {
 }
 .toast-snooze:hover, .toast-done:hover { background: rgba(var(--accent-rgb), 0.5); }
 .toast-acts { display: inline-flex; gap: 6px; }
+/* 撤销删除提示条（P7.1）：带操作按钮时需要可交互 */
+.toast:has(.toast-act) { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
+.toast-act {
+  background: rgba(var(--accent-rgb), 0.3);
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  color: #cfe4f7;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toast-act:hover { background: rgba(var(--accent-rgb), 0.5); }
+
+/* 回收站面板（P7.1，设置-数据与备份区） */
+.trash-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid rgba(var(--txt-rgb), 0.08);
+  border-radius: 8px;
+  background: rgba(var(--txt-rgb), 0.03);
+}
+/* display:flex 会覆盖 hidden 属性的 UA 样式，需显式声明 */
+.trash-panel[hidden] { display: none; }
+.trash-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.trash-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.trash-item-title { color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trash-item-meta { color: var(--txt-dim, rgba(var(--txt-rgb), 0.55)); font-size: 11px; }
+.trash-panel .set-btn.danger, .set-btn.danger { color: #ff9b9b; border-color: rgba(255, 128, 128, 0.4); }
+.trash-clear { margin-top: 2px; align-self: flex-end; }
 
 /* ============ 同步操作日志（项目视图底部） ============ */
 .sync-log {

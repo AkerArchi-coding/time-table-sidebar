@@ -2258,15 +2258,27 @@ function batchPatchFields(ids, patch) {
 function batchDeleteEvents(ids) {
   const all = loadEvents();
   const pids = new Set();
+  // 回收站（P7.1）：删除前批量移入回收站，支持撤销恢复
+  let trash = loadTrashEvents();
+  let trashed = 0;
   for (const id of ids) {
     const ev = all.find(e => e.id === id);
-    if (ev && ev.projectId) pids.add(ev.projectId);
+    if (!ev) continue;
+    trash = trashPush(trash, ev);
+    trashed++;
+    if (ev.projectId) pids.add(ev.projectId);
   }
+  saveTrashEvents(trash);
   saveEvents(all.filter(e => !ids.includes(e.id)));
   // 同步墓碑（P3.4）：批量删除同样写墓碑，保证删除传播
   for (const id of ids) addTombstone(id, 'event');
   pids.forEach(p => bumpProjectRevision(p));
   render();
+  // 撤销删除（P7.1）：6 秒内可从 toast 一次性恢复
+  if (trashed) showActionToast(`已删除 ${trashed} 项`, '撤销', () => {
+    const n = restoreFromTrash(ids);
+    showToast(n ? `已恢复 ${n} 项` : '未能恢复（回收站中已不存在）');
+  });
 }
 
 // 批量操作条（事项视图顶部；分类选择复用右键菜单面板）
@@ -2439,10 +2451,17 @@ function deleteEvent(id) {
   if (id.includes('@')) id = id.slice(0, id.lastIndexOf('@'));
   const all = loadEvents();
   const ev = all.find(e => e.id === id);
+  // 回收站（P7.1）：删除前移入回收站，支持撤销恢复
+  if (ev) saveTrashEvents(trashPush(loadTrashEvents(), ev));
   saveEvents(all.filter(e => e.id !== id));
   addTombstone(id, 'event');   // 同步墓碑（P3.4）：删除传播
   if (ev && ev.projectId) bumpProjectRevision(ev.projectId);
   render();
+  // 撤销删除（P7.1）：6 秒内可从 toast 撤销
+  if (ev) showActionToast(`已删除「${ev.title}」`, '撤销', () => {
+    if (restoreFromTrash([id])) showToast('已恢复');
+    else showToast('未能恢复（回收站中已不存在）');
+  });
 }
 
 function toggleDone(id) {
@@ -2631,6 +2650,75 @@ function addTombstone(id, kind) {
   const rest = list.filter(t => !(t.id === id && t.kind === kind));
   rest.push({ id, kind, deletedAt: new Date().toISOString(), deviceId: getDeviceId() });
   saveTombstones(rest);
+}
+
+// ---- 回收站（P7.1）：删除事项的本地安全网，localStorage: trashEvents ----
+// 结构：事项原对象 + deletedAt 时间戳；上限 200 条滚动，超 30 天自动清理。
+// 只进三档备份（BUSINESS_KEYS），不进局域网同步快照：删除传播以墓碑为准，回收站仅本机救济。
+const TRASH_MAX = 200;
+const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function loadTrashEvents() {
+  try {
+    const list = JSON.parse(localStorage.getItem('trashEvents') || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+function saveTrashEvents(list) {
+  try { localStorage.setItem('trashEvents', JSON.stringify(list)); }
+  catch (e) { notifyStorageFail(e); }
+}
+// 纯函数：移入回收站（最新在前；同 id 去重保留最新删除记录；滚动截断）
+function trashPush(list, ev, now) {
+  const item = Object.assign({}, ev, { deletedAt: (now || new Date()).toISOString() });
+  const rest = (Array.isArray(list) ? list : []).filter(t => t && t.id !== ev.id);
+  return [item].concat(rest).slice(0, TRASH_MAX);
+}
+// 纯函数：清理超过 30 天的回收站条目（缺 deletedAt 视为极旧，一并清理）
+function trashPurge(list, now) {
+  const nowMs = (now || new Date()).getTime();
+  return (Array.isArray(list) ? list : []).filter(t => t && nowMs - new Date(t.deletedAt || 0).getTime() < TRASH_TTL_MS);
+}
+// 恢复回收站事项（P7.1）：updatedAt 置为当前（晚于墓碑 deletedAt，设备同步不会再删它），
+// 同时清除本地墓碑；同 id 事项仍存在时跳过（不重复恢复）。返回实际恢复数量。
+function restoreFromTrash(ids) {
+  const want = (Array.isArray(ids) ? ids : [ids])
+    .map(id => { const s = String(id); return s.includes('@') ? s.slice(0, s.lastIndexOf('@')) : s; });
+  const trash = loadTrashEvents();
+  const picked = [], kept = [];
+  for (const t of trash) (want.includes(t.id) ? picked : kept).push(t);
+  if (!picked.length) return 0;
+  const nowIso = new Date().toISOString();
+  const all = loadEvents();
+  const existing = new Set(all.map(e => e.id));
+  const pids = new Set();
+  let restored = 0;
+  for (const t of picked) {
+    if (existing.has(t.id)) continue;
+    const ev = Object.assign({}, t);
+    delete ev.deletedAt;
+    ev.updatedAt = nowIso;
+    all.push(ev);
+    if (ev.projectId) pids.add(ev.projectId);
+    restored++;
+  }
+  saveEvents(all);
+  saveTrashEvents(kept);
+  // 恢复后事件重新存在，本地对应墓碑移除（避免后续同步把该墓碑合并传播到对端）
+  saveTombstones(loadTombstones().filter(t => t.kind === 'event' ? !want.includes(t.id) : true));
+  pids.forEach(p => bumpProjectRevision(p));
+  render();
+  return restored;
+}
+// 彻底删除回收站条目（P7.1）：仅从回收站移除，不动墓碑（删除语义已在删除时确立）
+function purgeTrashItems(ids) {
+  const want = (Array.isArray(ids) ? ids : [ids]).map(String);
+  saveTrashEvents(loadTrashEvents().filter(t => !want.includes(t.id)));
+}
+// 回收站打开时清理过期条目；有变化则回写。返回清理后的列表。
+function trashPruneOnOpen() {
+  const list = trashPurge(loadTrashEvents());
+  saveTrashEvents(list);
+  return list;
 }
 
 // ---- 同步快照组装/合并（P3.4） ----
@@ -3609,10 +3697,31 @@ function showToast(msg, type) {
     document.body.appendChild(t);
   }
   t.classList.toggle('error', type === 'error');
+  t.classList.remove('toast-remind');   // 与提醒条共用元素，避免残留提醒样式
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+// 带操作按钮的提示条（P7.1 撤销删除用）：复用 .toast 元素，6 秒内可点击
+function showActionToast(msg, actionLabel, onAction) {
+  let t = document.querySelector('.toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.className = 'toast';
+    document.body.appendChild(t);
+  }
+  t.classList.remove('error', 'toast-remind');
+  t.innerHTML = `<span class="toast-msg">${escapeHtml(msg)}</span><span class="toast-acts"><button class="toast-act" type="button">${escapeHtml(actionLabel)}</button></span>`;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
+  const btn = t.querySelector('.toast-act');
+  if (btn) btn.addEventListener('click', () => {
+    t.classList.remove('show');
+    if (typeof onAction === 'function') onAction();
+  });
 }
 
 // 事项提醒 toast（P4.4 增强）：含「完成」「稍后 5 分钟」按钮与设置开关
@@ -6336,6 +6445,14 @@ function buildSettings(panel) {
         </span>
         <button type="button" class="set-btn" id="icalImportBtn">导入</button>
       </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">回收站</span>
+          <span class="set-desc" id="trashDesc">删除的事项保留 30 天，可恢复</span>
+        </span>
+        <button type="button" class="set-btn" id="trashToggleBtn">查看</button>
+      </div>
+      <div id="trashPanel" class="trash-panel" hidden></div>
     </div>
     <div class="set-group">
       <div class="set-group-title">设备同步</div>
@@ -6681,6 +6798,67 @@ function buildSettings(panel) {
         openTool('ical');   // 进入预览面板
       } catch (e) {
         showToast('读取失败：' + (e && e.message || e));
+      }
+    });
+  }
+
+  // ---- 回收站（P7.1）：展开/收起列表 + 恢复/彻底删除/清空 ----
+  const trashToggleBtn = panel.querySelector('#trashToggleBtn');
+  const trashPanelEl = panel.querySelector('#trashPanel');
+  const trashDescEl = panel.querySelector('#trashDesc');
+  // 渲染回收站列表（进入面板时先清理超期条目）
+  const renderTrashPanel = () => {
+    const list = trashPruneOnOpen();
+    if (trashDescEl) trashDescEl.textContent = list.length
+      ? `已删除 ${list.length} 项，保留 30 天可恢复`
+      : '回收站为空；删除的事项保留 30 天，可恢复';
+    if (trashToggleBtn) trashToggleBtn.textContent = '收起';
+    if (!trashPanelEl) return;
+    trashPanelEl.innerHTML = '';
+    if (!list.length) { trashPanelEl.hidden = true; if (trashToggleBtn) trashToggleBtn.textContent = '查看'; return; }
+    trashPanelEl.hidden = false;
+    for (const item of list.slice().sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''))) {
+      const row = document.createElement('div');
+      row.className = 'trash-item';
+      const delTime = (item.deletedAt || '').replace('T', ' ').slice(0, 16);
+      const origin = item.startDate || item.date || '';
+      row.innerHTML = `
+        <span class="trash-item-main">
+          <span class="trash-item-title">${escapeHtml(item.title || '（无标题）')}</span>
+          <span class="trash-item-meta">${escapeHtml(origin)} · 删除于 ${escapeHtml(delTime)}</span>
+        </span>
+        <button type="button" class="set-btn trash-restore">恢复</button>
+        <button type="button" class="set-btn danger trash-purge">彻底删除</button>`;
+      row.querySelector('.trash-restore').addEventListener('click', () => {
+        const n = restoreFromTrash([item.id]);
+        showToast(n ? '已恢复' : '恢复失败（同 id 事项已存在或条目已不存在）');
+        renderTrashPanel();
+      });
+      row.querySelector('.trash-purge').addEventListener('click', () => {
+        if (!confirm(`彻底删除「${item.title || '（无标题）'}」？此操作不可撤销。`)) return;
+        purgeTrashItems([item.id]);
+        renderTrashPanel();
+      });
+      trashPanelEl.appendChild(row);
+    }
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'set-btn danger trash-clear';
+    clearBtn.textContent = '清空回收站';
+    clearBtn.addEventListener('click', () => {
+      if (!confirm('清空回收站？其中全部事项将被彻底删除，此操作不可撤销。')) return;
+      saveTrashEvents([]);
+      renderTrashPanel();
+    });
+    trashPanelEl.appendChild(clearBtn);
+  };
+  if (trashToggleBtn && trashPanelEl) {
+    trashToggleBtn.addEventListener('click', () => {
+      if (trashPanelEl.hidden) renderTrashPanel();
+      else {
+        trashPanelEl.hidden = true;
+        trashPanelEl.innerHTML = '';
+        trashToggleBtn.textContent = '查看';
       }
     });
   }

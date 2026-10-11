@@ -19,7 +19,8 @@ const BACKUP_SCHEMA_VERSION = 1;
 const SETTINGS_KEYS = ['appSettings', 'pomoCfg', 'daySort', 'uiTheme'];
 // eventTemplates（P5.3 事项模板）只进三档备份；不进局域网同步快照，避免为此改动 mergeSyncData 引入风险
 // calSubscriptions（P6.4 日历订阅定义）同样只进三档备份、不进同步快照；calSubCache_* 订阅缓存不进备份（刷新即重建）
-const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'recurDone', 'deviceId', 'syncPairs', 'syncTombstones', 'eventTemplates', 'calSubscriptions'];
+// trashEvents（P7.1 回收站）只进三档备份、不进同步快照：删除传播以墓碑为准，回收站是本地救济网
+const BUSINESS_KEYS = ['projects', 'events', 'syncBases', 'syncLog', 'notesDoneLines', 'quickNotes', 'pomoTaskLogs', 'pomoHistory', 'recurDone', 'deviceId', 'syncPairs', 'syncTombstones', 'eventTemplates', 'calSubscriptions', 'trashEvents'];
 const STATE_KEYS = ['remindedKeys', 'weatherCity', 'pomoStats'];   // 运行时状态，可一并备份但导入时不强制覆盖
 
 function safeGet(key) {
