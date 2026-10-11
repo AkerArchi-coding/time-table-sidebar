@@ -1051,6 +1051,21 @@ function renderWeek() {
 }
 
 // ============ 月历视图（P4.2）：6×7 网格 + 热力底色 + 项目工期条 ============
+// P6.1 交互补齐：格子右键菜单 / +N 手风琴展开 / 事项条拖拽改期
+let monthExpandKey = '';      // +N 展开的格子日期（同时只允许一格展开，'' = 全部收起）
+let monthDragSuppress = false; // 拖拽刚结束时抑制随后的 click（避免误开编辑器）
+
+// +N 展开/收起切换（只改状态，调用方负责 render）
+function monthToggleExpand(key) {
+  monthExpandKey = (monthExpandKey === key) ? '' : key;
+}
+
+// 月历定位到某日：切周视图并让该日落在第二张卡（与点格子/gotoSearchResult 同口径）
+function monthGotoDate(key) {
+  rangeStart = addDays(parseDateKey(key), -1);
+  calendarMode = 'calendar';
+}
+
 // 纯函数：构建 6×7 月历网格（周一开头，复用 startOfWeek），42 格固定（跨月尾首衔接）
 function buildMonthGrid(anchor) {
   const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
@@ -1095,8 +1110,9 @@ function buildMonthView() {
   }
   for (const cell of grid) {
     const evs = getEventsByDate(cell.key);
+    const expanded = cell.key === monthExpandKey;   // P6.1：该格 +N 手风琴展开态
     const cellEl = document.createElement('div');
-    cellEl.className = 'month-cell' + (cell.inMonth ? '' : ' out') + (cell.isToday ? ' today' : '');
+    cellEl.className = 'month-cell' + (cell.inMonth ? '' : ' out') + (cell.isToday ? ' today' : '') + (expanded ? ' expanded' : '');
     cellEl.dataset.key = cell.key;
     cellEl.dataset.heat = String(Math.min(evs.length, 5));   // 热力分档 0~5
     cellEl.title = evs.length ? `${cell.key}（${evs.length} 项）` : cell.key;
@@ -1106,15 +1122,18 @@ function buildMonthView() {
     dayEl.textContent = String(cell.day);
     cellEl.appendChild(dayEl);
 
-    for (const ev of evs.slice(0, 3)) {
+    // 展开态显示全部事项条，收起态最多 3 条
+    for (const ev of evs.slice(0, expanded ? evs.length : 3)) {
       const cat = CATEGORIES[ev.category] || CATEGORIES.work;
       const chip = document.createElement('div');
       chip.className = 'month-ev' + (ev.done ? ' done' : '');
       chip.style.borderLeftColor = cat.color;
       chip.textContent = (ev.time ? ev.time + ' ' : '') + ev.title;
       chip.title = ev.title;
+      chip.dataset.id = ev.id;   // 右键菜单 / 拖拽改期用（虚拟投影为复合 id）
       chip.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (monthDragSuppress) return;   // 拖拽刚结束的 click 不打开编辑
         // 虚拟事项（模板id@日期）→ 编辑作用于模板（与右键菜单语义一致）
         const id = ev.id.includes('@') ? ev.id.slice(0, ev.id.lastIndexOf('@')) : ev.id;
         const real = loadEvents().find(x => x.id === id);
@@ -1122,10 +1141,16 @@ function buildMonthView() {
       });
       cellEl.appendChild(chip);
     }
-    if (evs.length > 3) {
+    if (expanded || evs.length > 3) {
       const more = document.createElement('div');
       more.className = 'month-ev-more';
-      more.textContent = `+${evs.length - 3}`;
+      more.textContent = expanded ? '收起' : `+${evs.length - 3}`;
+      more.title = expanded ? '收起当日清单' : '展开当日全部事项';
+      more.addEventListener('click', (e) => {
+        e.stopPropagation();
+        monthToggleExpand(cell.key);
+        render();
+      });
       cellEl.appendChild(more);
     }
 
@@ -1152,14 +1177,83 @@ function buildMonthView() {
 
     // 点格子空白区 → 切周视图定位该日（事项条已 stopPropagation）
     cellEl.addEventListener('click', () => {
-      rangeStart = addDays(parseDateKey(cell.key), -1);   // 与 gotoSearchResult 一致：该日落在第二张卡
-      calendarMode = 'calendar';
+      monthGotoDate(cell.key);   // 该日落在第二张卡，与 gotoSearchResult 一致
       render();
     });
     gridEl.appendChild(cellEl);
   }
   wrap.appendChild(gridEl);
+  enableMonthDrag(gridEl);   // P6.1：事项条拖拽改期
   return wrap;
+}
+
+// ============ 月历拖拽改期（P6.1）：与周视图同一套 mousedown 自实现 ============
+// 阈值 6px 防误触；Esc 取消；落点格子高亮；虚拟投影按模板改期（与右键语义一致）
+function enableMonthDrag(rootEl) {
+  if (batchMode) return;
+  let ghost = null, dragId = '', started = false, sx = 0, sy = 0, canceled = false;
+  const clearHover = () => rootEl.querySelectorAll('.month-cell.drag-over').forEach(c => c.classList.remove('drag-over'));
+
+  rootEl.querySelectorAll('.month-ev').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || currentTool || editing) return;
+      dragId = item.dataset.id || '';
+      if (!dragId) return;
+      sx = e.clientX; sy = e.clientY; started = false; canceled = false;
+
+      const cleanup = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('keydown', onKey, true);
+        if (ghost) { ghost.remove(); ghost = null; }
+        item.classList.remove('dragging');
+        clearHover();
+      };
+      const onMove = (me) => {
+        if (!started && Math.hypot(me.clientX - sx, me.clientY - sy) < 6) return;   // 位移阈值，普通点击不受扰
+        if (!started) {
+          started = true;
+          ghost = document.createElement('div');
+          ghost.className = 'drag-ghost';
+          ghost.textContent = item.textContent;
+          document.body.appendChild(ghost);
+          item.classList.add('dragging');
+        }
+        ghost.style.left = (me.clientX + 12) + 'px';
+        ghost.style.top = (me.clientY + 8) + 'px';
+        clearHover();
+        const el = document.elementFromPoint(me.clientX, me.clientY);
+        const cell = el && el.closest ? el.closest('.month-cell[data-key]') : null;
+        if (cell) cell.classList.add('drag-over');
+      };
+      const onUp = (ue) => {
+        const wasStarted = started;
+        cleanup();
+        if (!wasStarted || canceled) return;
+        // 抑制随后的 click（避免松手后误开编辑器）；click 在 mouseup 后同步派发
+        monthDragSuppress = true;
+        setTimeout(() => { monthDragSuppress = false; }, 0);
+        const el = document.elementFromPoint(ue.clientX, ue.clientY);
+        const cell = el && el.closest ? el.closest('.month-cell[data-key]') : null;
+        if (!cell) return;
+        const targetKey = cell.dataset.key;
+        const srcKey = item.closest('.month-cell') ? item.closest('.month-cell').dataset.key : '';
+        if (targetKey && targetKey !== srcKey) {
+          // 虚拟投影 id（模板id@日期）→ 作用于模板
+          const id = dragId.includes('@') ? dragId.slice(0, dragId.lastIndexOf('@')) : dragId;
+          moveEventToDate(id, targetKey);
+        }
+      };
+      const onKey = (ke) => {
+        if (ke.key !== 'Escape') return;
+        canceled = true;   // 仅清理，不改期
+        cleanup();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.addEventListener('keydown', onKey, true);
+    });
+  });
 }
 
 // ============ 周视图拖拽改期（P4.2）：mousedown 自实现（HTML5 DnD 在无边框透明窗口表现不稳） ============
@@ -6290,6 +6384,8 @@ document.addEventListener('contextmenu', (e) => {
   const projectCard = e.target.closest('.project-card, .project-info');
   const eventItem = e.target.closest('.event-item');
   const ganttEl = e.target.closest('[data-gantt-id]');   // 甘特图时间条/事项名
+  const monthEv = e.target.closest('.month-ev');         // 月历事项条（P6.1）
+  const monthCell = e.target.closest('.month-cell');     // 月历格子空白区（P6.1）
   const card = e.target.closest('.day-card');
   const targetDate = card ? card.dataset.date : dateKey(today());
 
@@ -6297,12 +6393,34 @@ document.addEventListener('contextmenu', (e) => {
     showProjectMenu(e.clientX, e.clientY, projectCard.dataset.id);
   } else if (ganttEl && ganttEl.dataset.ganttId) {
     showEventMenu(e.clientX, e.clientY, ganttEl.dataset.ganttId);
+  } else if (monthEv && monthEv.dataset.id) {
+    showEventMenu(e.clientX, e.clientY, monthEv.dataset.id);
+  } else if (monthCell && monthCell.dataset.key) {
+    showMonthCellMenu(e.clientX, e.clientY, monthCell.dataset.key);
   } else if (eventItem && eventItem.dataset.id) {
     showEventMenu(e.clientX, e.clientY, eventItem.dataset.id);
   } else {
     showBlankMenu(e.clientX, e.clientY, targetDate);
   }
 });
+
+// —— 月历格子菜单（P6.1）：在该日新建 / 查看该日 ——
+function showMonthCellMenu(x, y, key) {
+  showItems(x, y);
+  ctxItems.innerHTML = `
+    <div class="ctx-item" data-action="add">在该日新建事项</div>
+    <div class="ctx-item" data-action="goto">查看该日</div>
+  `;
+  bindItemHandlers({
+    add: () => {
+      // 月历无内联表单：先切周视图定位该日，再展开该日卡片内的添加表单（日期已预填）
+      monthGotoDate(key);
+      render();
+      openAddForm(key);
+    },
+    goto: () => { monthGotoDate(key); render(); }
+  });
+}
 
 // —— 空白处菜单（按视图区分） ——
 function showBlankMenu(x, y, targetDate) {
@@ -6542,12 +6660,12 @@ viewTabs.querySelectorAll('button').forEach(btn => {
 
 // ============ 范围导航（滚动轮换，仅日历视图；月历模式翻月） ============
 $('prevWeek').addEventListener('click', () => {
-  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() - 1, 1); render(); return; }
+  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() - 1, 1); monthExpandKey = ''; render(); return; }
   rangeStart = addDays(rangeStart, -PAGE_STEP);
   render();
 });
 $('nextWeek').addEventListener('click', () => {
-  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 1); render(); return; }
+  if (calendarMode === 'month') { monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 1); monthExpandKey = ''; render(); return; }
   rangeStart = addDays(rangeStart, PAGE_STEP);
   render();
 });

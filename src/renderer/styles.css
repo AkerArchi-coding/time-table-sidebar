@@ -2380,7 +2380,13 @@ html, body {
   text-overflow: ellipsis;
 }
 .month-ev.done { text-decoration: line-through; opacity: 0.6; }
-.month-ev-more { font-size: 9px; color: rgba(var(--txt-rgb), 0.45); padding-left: 3px; }
+.month-ev-more { font-size: 9px; color: rgba(var(--txt-rgb), 0.45); padding-left: 3px; cursor: pointer; }
+.month-ev-more:hover { color: var(--accent-txt); }
+
+/* ===== P6.1 月历交互：+N 展开态 / 拖拽改期 ===== */
+.month-cell.expanded { background: rgba(var(--accent-rgb), 0.08); }
+.month-cell.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.month-ev.dragging { opacity: 0.35; }
 .month-pjs { display: flex; gap: 2px; margin-top: 2px; }
 .month-pj {
   flex: 1;
