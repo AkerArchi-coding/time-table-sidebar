@@ -253,8 +253,10 @@ html, body {
 
 .event-item {
   display: flex;
+  flex-wrap: wrap;          /* 徽标/标签自动换到独立行，标题不再被挤成竖条 */
   align-items: center;
   gap: 6px;
+  row-gap: 2px;
   padding: 4px 6px 4px 8px;
   border-radius: 5px;
   background: rgba(0, 0, 0, 0.15);
@@ -263,6 +265,17 @@ html, body {
   /* 分类竖条：border-left 由 JS 设置颜色 */
   border-left: 3px solid transparent;
 }
+/* 行内排序：第一行 = 圆点/勾选/时间/标题/删除；第二行 = 各类徽标 */
+.event-item .urgency-dot { order: 1; }
+.event-item .event-check { order: 2; }
+.event-item .event-time { order: 3; }
+.event-item .event-title { order: 4; }
+.event-item .event-del { order: 5; }
+.event-item .event-date-badge,
+.event-item .event-project-badge,
+.event-item .event-phase-badge,
+.event-item .event-tag-badge,
+.event-item .event-ck-badge { order: 6; flex: 0 0 auto; }
 .event-item:hover { background: rgba(0, 0, 0, 0.25); }
 .event-item.done { opacity: 0.5; }
 /* 已完成事项：粗横线划掉 */
@@ -309,7 +322,8 @@ html, body {
   flex: 0 0 auto;
 }
 .event-title {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   word-break: break-all;
 }
 .event-del {
@@ -495,9 +509,11 @@ html, body {
 .event-project-badge {
   background: rgba(var(--accent-rgb), 0.22);
   color: var(--accent-txt);
-  max-width: 80px;
+  max-width: 100%;        /* 徽标行内可换行显示完整名称，不再硬截断 */
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .event-project-badge.project-none {
   background: rgba(var(--txt-rgb), 0.08);
@@ -507,10 +523,11 @@ html, body {
 .event-phase-badge {
   background: rgba(114, 46, 209, 0.20);
   color: #9254de;
-  max-width: 70px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;     /* 允许换行 */
+  overflow-wrap: anywhere;
 }
 /* 今日/日历日期卡内：项目徽标改为窄块自动换行（最多两行），不再单行占宽 */
 .day-card .event-project-badge {
@@ -1419,39 +1436,41 @@ html, body {
 }
 
 /* ============ 面板工具条（展开态） ============ */
+/* 两列网格：主选项卡下方图标多时不再挤压成单行 */
 .tool-strip {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 2px;
   padding: 4px 8px 3px;
   border-bottom: 1px solid rgba(var(--txt-rgb), 0.06);
 }
 .strip-btn {
-  flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 1px;
-  padding: 3px 0 4px;
+  gap: 6px;
+  padding: 4px 8px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: rgba(var(--txt-rgb), 0.75);
   cursor: pointer;
   transition: background .15s, color .15s;
+  text-align: left;
 }
 .strip-btn:hover { background: rgba(var(--txt-rgb), 0.07); color: var(--txt); }
 .strip-btn.active { background: rgba(var(--accent-rgb), 0.25); color: var(--txt); }
 .strip-btn.tool-soon { opacity: 0.35; cursor: default; }
 .strip-btn.tool-soon:hover { background: transparent; color: rgba(var(--txt-rgb), 0.75); }
-.strip-ico { font-size: 14px; line-height: 1; }
-.strip-label { font-size: 9.5px; white-space: nowrap; }
+.strip-ico { font-size: 14px; line-height: 1; flex: 0 0 auto; width: 18px; text-align: center; }
+.strip-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 分隔符在网格下横跨整行 */
 .strip-sep {
-  width: 1px;
-  align-self: stretch;
+  grid-column: 1 / -1;
+  height: 1px;
   background: rgba(var(--txt-rgb), 0.12);
-  margin: 2px 2px;
+  margin: 3px 2px;
 }
 
 /* ============ 工具覆盖层（快速添加/番茄钟/进度/便签） ============ */
