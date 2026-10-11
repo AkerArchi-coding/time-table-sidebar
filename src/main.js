@@ -471,6 +471,64 @@ ipcMain.handle('backup-import-dialog', async (e) => {
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
+
+// ============ 自动备份（P7.2）：userData/auto-backups/ 下滚动保留最近 7 份全量备份 ============
+// 目录在每次调用时经 app.getPath('userData') 解析，自动跟随数据目录迁移
+const { AUTO_BACKUP_KEEP, autoBackupName, parseAutoBackupName, pickTrim } = require('./main/auto-backup');
+function autoBackupDir() {
+  return path.join(app.getPath('userData'), 'auto-backups');
+}
+// 写入一份自动备份（content 为完整备份 JSON 字符串），超出保留数删除最旧
+ipcMain.handle('backup-auto-write', (_e, content) => {
+  try {
+    if (typeof content !== 'string' || !content) return { ok: false, error: 'invalid' };
+    const dir = autoBackupDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const name = autoBackupName(new Date());
+    fs.writeFileSync(path.join(dir, name), content, 'utf8');
+    // 滚动裁剪：只保留最近 AUTO_BACKUP_KEEP 份
+    const names = fs.readdirSync(dir);
+    for (const stale of pickTrim(names, AUTO_BACKUP_KEEP)) {
+      try { fs.unlinkSync(path.join(dir, stale)); } catch { /* 单文件删除失败不阻塞 */ }
+    }
+    return { ok: true, name };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+// 列出自动备份文件（按时间倒序：文件名 + 修改时间毫秒 + 字节数；目录不存在视为空）
+ipcMain.handle('backup-auto-list', () => {
+  try {
+    const dir = autoBackupDir();
+    const list = fs.readdirSync(dir)
+      .map(n => ({ name: n, t: parseAutoBackupName(n) }))
+      .filter(x => x.t !== null)
+      .sort((a, b) => b.t - a.t)
+      .map(x => {
+        let mtime = 0, size = 0;
+        try { const st = fs.statSync(path.join(dir, x.name)); mtime = st.mtimeMs; size = st.size; } catch { /* 文件刚被删等 */ }
+        return { name: x.name, mtime, size };
+      });
+    return { ok: true, list };
+  } catch { return { ok: true, list: [] }; }
+});
+// 读取一份自动备份内容（文件名校验防目录穿越；恢复走渲染层现有导入校验流程）
+ipcMain.handle('backup-auto-read', (_e, name) => {
+  try {
+    if (!/^tt-auto-\d{8}-\d{6}\.json$/.test(String(name || ''))) return { ok: false, error: 'invalid' };
+    const content = fs.readFileSync(path.join(autoBackupDir(), String(name)), 'utf8');
+    return { ok: true, content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+// 在系统文件管理器中打开自动备份文件夹
+ipcMain.handle('backup-auto-open-dir', async () => {
+  const dir = autoBackupDir();
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 打开时兜底创建失败也无妨 */ }
+  await require('electron').shell.openPath(dir);
+  return { ok: true };
+});
 // iCal 日历文件保存对话框（.ics，P4.3）
 ipcMain.handle('ical-export-dialog', async (e, { defaultName, content }) => {
   const win = BrowserWindow.fromWebContents(e.sender);

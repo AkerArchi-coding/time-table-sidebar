@@ -5911,12 +5911,50 @@ function loadAppSettings() {
       hotkeyQuickAddEnabled: false, // 全局快捷键：Ctrl+Alt+N 快速添加（默认关，避免打扰）
       reminderToastEnabled: true,  // 应用内提醒条（P4.4，默认开；关闭后到点仅系统通知+响铃）
       autoSyncEnabled: false,      // 定时自动同步（P4.4，默认关；10 分钟间隔，需配合对端在线）
+      autoBackupEnabled: true,     // 自动备份（P7.2，默认开；距上次成功备份超 20h 时写一份全量备份）
+      lastAutoBackupAt: 0,         // 上次自动备份成功的时间戳（毫秒）
       ...saved                     // 已有设置覆盖默认
     };
   } catch { return {}; }
 }
 function saveAppSettings(s) {
   localStorage.setItem('appSettings', JSON.stringify(s));
+}
+
+// ---- 自动备份（P7.2）：启动后与每小时检查一次，距上次成功备份超过间隔则写一份全量备份 ----
+// 备份文件由主进程写入 userData/auto-backups/（滚动保留最近 7 份），失败静默（不打扰用户）
+const AUTO_BACKUP_INTERVAL_MS = 20 * 60 * 60 * 1000;   // 20 小时（每日一备 + 富余）
+// 纯函数：调度判定（无记录视为从未备份 → 立即执行；其余按间隔）
+function autoBackupDue(lastMs, nowMs) {
+  return !lastMs || (nowMs - lastMs >= AUTO_BACKUP_INTERVAL_MS);
+}
+// 执行一次自动备份：复用 buildBackup('full', ...) 全量口径，成功后记录时间戳
+async function runAutoBackup() {
+  if (!window.timetable || !window.timetable.backupAutoWrite || !window.Backup) return false;
+  try {
+    let mainFiles = null;
+    if (window.timetable.backupGetMainFiles) mainFiles = await window.timetable.backupGetMainFiles();
+    let appVer = 'unknown';
+    if (window.timetable.appVersion) {
+      try { appVer = await window.timetable.appVersion() || 'unknown'; } catch { /* 版本号拿不到不阻塞 */ }
+    }
+    const content = JSON.stringify(window.Backup.buildBackup('full', mainFiles, appVer));
+    const res = await window.timetable.backupAutoWrite(content);
+    if (res && res.ok) {
+      const s = loadAppSettings();
+      s.lastAutoBackupAt = Date.now();
+      saveAppSettings(s);
+      return true;
+    }
+  } catch { /* 自动备份失败静默；手动导出/导入功能不受影响 */ }
+  return false;
+}
+// 调度入口：开关关闭或未到间隔则跳过
+function maybeAutoBackup() {
+  const s = loadAppSettings();
+  if (s.autoBackupEnabled === false) return;
+  if (!autoBackupDue(s.lastAutoBackupAt || 0, Date.now())) return;
+  runAutoBackup();
 }
 
 // ---- 工具：设备同步（P3.4 局域网同步） ----
@@ -6453,6 +6491,25 @@ function buildSettings(panel) {
         <button type="button" class="set-btn" id="trashToggleBtn">查看</button>
       </div>
       <div id="trashPanel" class="trash-panel" hidden></div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">自动备份</span>
+          <span class="set-desc" id="autoBackupDesc">每日自动保存全量备份（保留最近 7 份）</span>
+        </span>
+        <span class="set-switch"><input type="checkbox" class="set-autobackup-input"><span class="set-slider"></span></span>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">自动备份管理</span>
+          <span class="set-desc" id="autoBackupListDesc">查看 / 恢复自动备份文件</span>
+        </span>
+        <span class="autobackup-btns">
+          <button type="button" class="set-btn" id="autoBackupListBtn">查看</button>
+          <button type="button" class="set-btn" id="autoBackupNowBtn">立即备份</button>
+          <button type="button" class="set-btn" id="autoBackupOpenBtn">打开</button>
+        </span>
+      </div>
+      <div id="autoBackupPanel" class="trash-panel" hidden></div>
     </div>
     <div class="set-group">
       <div class="set-group-title">设备同步</div>
@@ -6861,6 +6918,107 @@ function buildSettings(panel) {
         trashToggleBtn.textContent = '查看';
       }
     });
+  }
+
+  // ---- 自动备份（P7.2）：开关 + 上次时间显示 + 立即备份 + 打开文件夹 + 列表恢复 ----
+  const abSwitch = panel.querySelector('.set-autobackup-input');
+  const abDesc = panel.querySelector('#autoBackupDesc');
+  if (abSwitch) {
+    abSwitch.checked = st.autoBackupEnabled !== false;
+    abSwitch.addEventListener('change', () => {
+      const s = loadAppSettings();
+      s.autoBackupEnabled = abSwitch.checked;
+      saveAppSettings(s);
+      showToast(abSwitch.checked ? '自动备份已开启（保留最近 7 份）' : '自动备份已关闭');
+    });
+  }
+  if (abDesc) {
+    const lastAt = st.lastAutoBackupAt || 0;
+    abDesc.textContent = lastAt
+      ? `每日自动保存全量备份（保留 7 份）；上次：${new Date(lastAt).toLocaleString('zh-CN', { hour12: false })}`
+      : '每日自动保存全量备份（保留最近 7 份）';
+  }
+  const abListBtn = panel.querySelector('#autoBackupListBtn');
+  const abPanel = panel.querySelector('#autoBackupPanel');
+  const abListDesc = panel.querySelector('#autoBackupListDesc');
+  // 渲染自动备份文件列表（按时间倒序，每项可恢复；恢复走完整备份覆盖流程）
+  const renderAutoBackupPanel = async () => {
+    if (!abPanel || !window.timetable || !window.timetable.backupAutoList) return;
+    abPanel.innerHTML = '';
+    let list = [];
+    try {
+      const res = await window.timetable.backupAutoList();
+      list = (res && res.list) || [];
+    } catch { /* 主进程不可达时按空列表处理 */ }
+    if (abListDesc) abListDesc.textContent = list.length ? `共 ${list.length} 份（保留最近 7 份）` : '暂无自动备份文件';
+    if (!list.length) {
+      abPanel.hidden = true;
+      if (abListBtn) abListBtn.textContent = '查看';
+      return;
+    }
+    abPanel.hidden = false;
+    for (const f of list) {
+      const row = document.createElement('div');
+      row.className = 'trash-item';
+      const dt = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : f.name;
+      const kb = f.size ? ` · ${(f.size / 1024).toFixed(1)} KB` : '';
+      row.innerHTML = `
+        <span class="trash-item-main">
+          <span class="trash-item-title">${escapeHtml(f.name)}</span>
+          <span class="trash-item-meta">${escapeHtml(dt)}${escapeHtml(kb)}</span>
+        </span>
+        <button type="button" class="set-btn trash-restore">恢复</button>`;
+      row.querySelector('.trash-restore').addEventListener('click', async () => {
+        if (!confirm('恢复该自动备份？完整备份将覆盖当前所有数据（项目、事项、设置等），此操作不可撤销。是否继续？')) return;
+        try {
+          const r = await window.timetable.backupAutoRead(f.name);
+          if (!r || !r.ok) { showToast('读取失败：' + ((r && r.error) || '未知错误')); return; }
+          let data;
+          try { data = JSON.parse(r.content); }
+          catch { showToast('备份文件格式损坏（JSON 解析失败）'); return; }
+          const v = window.Backup.validateBackup(data);
+          if (!v.ok) { showToast(v.error); return; }
+          window.Backup.applyFullReplace(data);
+          if (data.mainFiles && window.timetable.backupSetMainFiles) {
+            await window.timetable.backupSetMainFiles(data.mainFiles);
+          }
+          showToast('自动备份已恢复，正在刷新…');
+          setTimeout(() => { render(); window.location.reload(); }, 400);
+        } catch (e) {
+          showToast('恢复失败：' + (e && e.message || e));
+        }
+      });
+      abPanel.appendChild(row);
+    }
+  };
+  if (abListBtn && abPanel) {
+    abListBtn.addEventListener('click', () => {
+      if (abPanel.hidden) {
+        abListBtn.textContent = '收起';
+        renderAutoBackupPanel();
+      } else {
+        abPanel.hidden = true;
+        abPanel.innerHTML = '';
+        abListBtn.textContent = '查看';
+      }
+    });
+  }
+  const abNowBtn = panel.querySelector('#autoBackupNowBtn');
+  if (abNowBtn) {
+    abNowBtn.addEventListener('click', async () => {
+      const oldText = abNowBtn.textContent;
+      abNowBtn.disabled = true;
+      abNowBtn.textContent = '备份中…';
+      const ok = await runAutoBackup();
+      abNowBtn.disabled = false;
+      abNowBtn.textContent = oldText;
+      showToast(ok ? '自动备份完成' : '自动备份失败（主进程不可用或磁盘错误）');
+      if (ok && abPanel && !abPanel.hidden) renderAutoBackupPanel();
+    });
+  }
+  const abOpenBtn = panel.querySelector('#autoBackupOpenBtn');
+  if (abOpenBtn && window.timetable && window.timetable.backupAutoOpenDir) {
+    abOpenBtn.addEventListener('click', () => { window.timetable.backupAutoOpenDir().catch(() => { /* 打开失败静默 */ }); });
   }
 
   // ---- 设备同步：显示 deviceId，按钮跳转同步工具页 ----
@@ -7279,6 +7437,9 @@ if (window.timetable && window.timetable.syncHello) {
 if (window.timetable) {
   const bootSt = loadAppSettings();
   window.timetable.clipboardEnabled(bootSt.clipboardEnabled !== false);
+  // 自动备份（P7.2）：启动时检查一次 + 窗口存活期每小时复查（主进程不支持时内部自行跳过）
+  maybeAutoBackup();
+  setInterval(maybeAutoBackup, 60 * 60 * 1000);
   // 托盘菜单动作（如"设置"→ 展开并打开设置工具）
   window.timetable.onTrayAction((d) => {
     if (d && d.action === 'settings') openTool('settings');

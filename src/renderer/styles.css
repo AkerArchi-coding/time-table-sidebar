@@ -1199,6 +1199,8 @@ html, body {
 .trash-item-meta { color: var(--txt-dim, rgba(var(--txt-rgb), 0.55)); font-size: 11px; }
 .trash-panel .set-btn.danger, .set-btn.danger { color: #ff9b9b; border-color: rgba(255, 128, 128, 0.4); }
 .trash-clear { margin-top: 2px; align-self: flex-end; }
+/* 自动备份管理行内按钮组（P7.2） */
+.autobackup-btns { display: inline-flex; gap: 6px; }
 
 /* ============ 同步操作日志（项目视图底部） ============ */
 .sync-log {

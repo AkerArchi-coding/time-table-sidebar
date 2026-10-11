@@ -69,6 +69,11 @@ contextBridge.exposeInMainWorld('timetable', {
   backupSetMainFiles: (payload) => ipcRenderer.invoke('backup-set-main-files', payload),
   backupExportDialog: (defaultName, content) => ipcRenderer.invoke('backup-export-dialog', { defaultName, content }),
   backupImportDialog: () => ipcRenderer.invoke('backup-import-dialog'),
+  // 自动备份（P7.2）：写入 / 列表 / 读取 / 打开文件夹（文件保存在主进程数据目录 auto-backups/）
+  backupAutoWrite: (content) => ipcRenderer.invoke('backup-auto-write', content),
+  backupAutoList: () => ipcRenderer.invoke('backup-auto-list'),
+  backupAutoRead: (name) => ipcRenderer.invoke('backup-auto-read', name),
+  backupAutoOpenDir: () => ipcRenderer.invoke('backup-auto-open-dir'),
   // iCal 互通（P4.3）：导出/导入 .ics 文件对话框
   icalExportDialog: (defaultName, content) => ipcRenderer.invoke('ical-export-dialog', { defaultName, content }),
   icalImportDialog: () => ipcRenderer.invoke('ical-import-dialog'),
