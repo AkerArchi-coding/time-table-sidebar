@@ -995,6 +995,72 @@ html, body {
   border-left: 3px solid rgba(var(--txt-rgb), 0.4);
 }
 
+/* ============ P9.1 甘特图：阶段父级行 + 可收起事项 ============ */
+.gantt-phase-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(var(--txt-rgb), 0.82);
+  background: rgba(var(--txt-rgb), 0.028);
+  border-bottom: 1px dashed rgba(var(--txt-rgb), 0.1);
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
+}
+.gantt-phase-name:hover { background: rgba(var(--txt-rgb), 0.06); }
+.gantt-phase-toggle {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 9px;
+  color: rgba(var(--txt-rgb), 0.55);
+  line-height: 1;
+}
+.gp-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; }
+.gp-text { overflow: hidden; text-overflow: ellipsis; }
+.gp-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 400;
+  color: rgba(var(--txt-rgb), 0.45);
+}
+.gantt-phase-row {
+  background: rgba(var(--txt-rgb), 0.028);
+  border-bottom: 1px dashed rgba(var(--txt-rgb), 0.1);
+  cursor: pointer;
+}
+.gantt-phase-row:hover { background: rgba(var(--txt-rgb), 0.06); }
+/* 阶段横条：空心描边风格，明显区别于事项实体条，不可拖拽 */
+.gantt-phase-bar {
+  position: absolute;
+  top: 5px;
+  height: 14px;
+  min-width: 4px;
+  border-radius: 4px;
+  border: 1.5px dashed rgba(var(--txt-rgb), 0.55);
+  background: rgba(var(--txt-rgb), 0.03);
+  pointer-events: none;
+}
+.gp-nodate {
+  position: absolute;
+  top: 5px;
+  font-size: 9px;
+  color: rgba(var(--txt-rgb), 0.32);
+  padding-left: 8px;
+  line-height: 16px;
+  pointer-events: none;
+}
+/* 阶段下属事项行：左列缩进 */
+.gantt-name.under-phase { padding-left: 26px; font-weight: 400; }
+/* 超出阶段起止范围的事项条：警示描边 */
+.gantt-bar.over-range {
+  box-shadow: 0 0 0 1.5px #faad14, 0 0 6px rgba(250, 173, 20, 0.45);
+}
+
 /* ============ 项目选择面板（右键菜单内） ============ */
 .ctx-project-picker {
   padding: 8px 6px;
@@ -2803,11 +2869,39 @@ html, body {
 }
 .phase-item {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 3px;
   padding: 3px 6px;
   border-radius: 4px;
   background: rgba(var(--txt-rgb), 0.04);
+}
+/* P9.1：阶段主行（名称/进度/操作）与日期行 */
+.phase-item-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.phase-dates {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 14px;
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.5);
+}
+.phase-dates input[type="date"] {
+  font-size: 10px;
+  padding: 1px 3px;
+  color-scheme: inherit;
+  color: var(--txt);
+  background: rgba(var(--txt-rgb), 0.06);
+  border: 1px solid rgba(var(--txt-rgb), 0.15);
+  border-radius: 3px;
+}
+.phase-dur {
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.45);
+  margin-left: 2px;
 }
 .phase-dot {
   width: 8px;

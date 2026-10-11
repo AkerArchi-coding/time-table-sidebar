@@ -452,8 +452,15 @@ function loadProjects() {
       if (p.category === undefined) p.category = 'work';
       if (p.revision === undefined) p.revision = 1;                 // 同步版本号（导出/修改递增）
       if (p.updatedAt === undefined) p.updatedAt = p.createdAt || '';
-      // 阶段（P8.1）：项目下的阶段列表，[{id, name, order}]
+      // 阶段（P8.1）：项目下的阶段列表，[{id, name, order, startDate, endDate}]（P9.1 增日期）
       if (!Array.isArray(p.phases)) p.phases = [];
+      for (const ph of p.phases) {
+        if (ph.startDate === undefined) ph.startDate = '';
+        if (ph.endDate === undefined) ph.endDate = '';
+        if (ph.startDate && ph.endDate && ph.endDate < ph.startDate) {
+          const t = ph.startDate; ph.startDate = ph.endDate; ph.endDate = t;
+        }
+      }
       if (p.startDate && p.endDate && p.endDate < p.startDate) {
         const t = p.startDate; p.startDate = p.endDate; p.endDate = t;
       }
@@ -1871,15 +1878,25 @@ function buildPhaseBlock(p) {
     </div>
     <div class="phase-list">
       ${phases.length === 0 ? '<div class="phase-empty">暂无阶段，可将事项归入不同阶段</div>' : phases.map((ph, i) => {
-        const cnt = tasks.filter(t => t.phaseId === ph.id).length;
+        const pt = tasks.filter(t => t.phaseId === ph.id);
+        const prog = phaseProgress(pt);
+        const dur = (ph.startDate && ph.endDate) ? `${durationDays(ph.startDate, ph.endDate)} 天` : '';
         return `<div class="phase-item" data-phid="${ph.id}">
-          <span class="phase-dot" style="background:${phaseColor(i)}"></span>
-          <span class="phase-name" contenteditable="false" title="点击重命名">${escapeHtml(ph.name)}</span>
-          <span class="phase-count">${cnt} 事项</span>
-          <div class="phase-ops">
-            <button class="phase-up" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
-            <button class="phase-down" title="下移" ${i === phases.length - 1 ? 'disabled' : ''}>↓</button>
-            <button class="phase-del" title="删除阶段">✕</button>
+          <div class="phase-item-main">
+            <span class="phase-dot" style="background:${phaseColor(i)}"></span>
+            <span class="phase-name" contenteditable="false" title="点击重命名">${escapeHtml(ph.name)}</span>
+            <span class="phase-count">${prog.done}/${prog.total} · ${prog.pct}%</span>
+            <div class="phase-ops">
+              <button class="phase-up" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
+              <button class="phase-down" title="下移" ${i === phases.length - 1 ? 'disabled' : ''}>↓</button>
+              <button class="phase-del" title="删除阶段">✕</button>
+            </div>
+          </div>
+          <div class="phase-dates">
+            <input type="date" class="phase-date-start" value="${ph.startDate || ''}" title="阶段开始日期">
+            <span>~</span>
+            <input type="date" class="phase-date-end" value="${ph.endDate || ''}" title="阶段结束日期">
+            <span class="phase-dur">${dur}</span>
           </div>
         </div>`;
       }).join('')}
@@ -1928,6 +1945,15 @@ function buildPhaseBlock(p) {
         render();
       }
     });
+    // P9.1：阶段起止日期（只改阶段，不动事项；超范围事项在甘特图警告）
+    const dsEl = item.querySelector('.phase-date-start');
+    const deEl = item.querySelector('.phase-date-end');
+    const onDate = () => {
+      setPhaseDates(p.id, phid, dsEl.value, deEl.value);
+      render();
+    };
+    dsEl.addEventListener('change', onDate);
+    deEl.addEventListener('change', onDate);
   });
 
   return block;
@@ -1947,7 +1973,87 @@ function ganttClampDayW(w) {
 }
 const GANTT_ROW_H = 30;    // 甘特图事项行高 px
 const GANTT_GROUP_H = 24;  // 甘特图项目分组行高 px（总览）
+const GANTT_PHASE_H = 26;  // 甘特图阶段父级行高 px（P9.1）
 const GANTT_HEAD_H = 30;   // 甘特图表头高 px
+// P9.1 阶段折叠状态（仅会话内，不持久化、不影响 Task 数据）：key = projectId + ':' + phaseId
+const ganttPhaseCollapsed = new Set();
+function ganttPhaseKey(projectId, phaseId) { return (projectId || '_') + ':' + (phaseId || ''); }
+
+// 甘特图事项条 HTML（单项目/总览共用）；violMap: taskId → 'before'|'after' 超范围警告
+function ganttTaskBarHtml(t, minK, opts) {
+  opts = opts || {};
+  const cat = CATEGORIES[t.category] || CATEGORIES.work;
+  const off = Math.round((parseDateKey(eventStart(t)) - parseDateKey(minK)) / 86400000);
+  const dur = durationDays(eventStart(t), eventEnd(t));
+  const viol = opts.violMap ? opts.violMap.get(t.id) : null;
+  const overCls = viol ? ' over-range' : '';
+  const overTip = viol === 'before' ? '（⚠ 早于阶段开始日期）' : viol === 'after' ? '（⚠ 晚于阶段结束日期）' : '';
+  const prefix = opts.pjPrefix ? escapeHtml(opts.pjPrefix) + ' · ' : '';
+  const indent = opts.underPhase ? ' under-phase' : '';
+  const phTag = opts.showPhaseTag ? phaseBadgeHtml(t) : '';
+  const gAttr = opts.groupKey ? ` data-gphase="${opts.groupKey}"${ganttPhaseCollapsed.has(opts.groupKey) ? ' hidden' : ''}` : '';
+  const name = `<div class="gantt-name${t.done ? ' done' : ''}${indent}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}"${gAttr} title="${escapeHtml(t.title + overTip)}">${escapeHtml(t.title)}${isRecurOn(t) ? ' 🔁' : ''}</div>`;
+  const recurNote = isRecurOn(t) ? `（${RECUR_FREQ_LABELS[t.recur.freq] || '重复'}重复）` : '';
+  const bar = `
+    <div class="gantt-row" style="height:${GANTT_ROW_H}px"${gAttr}>
+      <div class="gantt-bar${t.done ? ' done' : ''}${overCls}" data-gantt-id="${t.id}"
+           style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${cat.color}55;border-left-color:${cat.color}"
+           title="${escapeHtml(t.title)}${overTip}（${prefix}${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天${recurNote ? '，' + recurNote.slice(1, -1) : ''}）">
+        ${phTag}<span class="bar-title">${escapeHtml(t.title)}</span>
+        <span class="bar-resize"></span>
+      </div>
+    </div>`;
+  return { name, bar };
+}
+
+// 甘特图阶段父级行 HTML（左侧名称 + 右侧阶段横条）；phase 为 null 表示"未分阶段"组（无横条）
+function ganttPhaseRowsHtml(g, minK, projectId, color) {
+  const key = ganttPhaseKey(projectId, g.phase ? g.phase.id : '');
+  const collapsed = ganttPhaseCollapsed.has(key);
+  const prog = phaseProgress(g.allTasks || g.tasks);
+  let meta = '';
+  let barRight = '';
+  let nameExtra = '';
+  if (g.phase) {
+    const s = g.phase.startDate, e = g.phase.endDate;
+    if (s && e) {
+      const off = Math.round((parseDateKey(s) - parseDateKey(minK)) / 86400000);
+      const dur = durationDays(s, e);
+      meta = `${fmtShort(s)}~${fmtShort(e)}（${dur}天）`;
+      barRight = `<div class="gantt-phase-bar" style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${color}22;border-left-color:${color}"
+        title="${escapeHtml(g.phase.name)}（${fmtShort(s)}~${fmtShort(e)}，${dur}天；完成 ${prog.done}/${prog.total}）"></div>`;
+    } else {
+      meta = '未设日期';
+    }
+    nameExtra = escapeHtml(g.phase.name);
+  } else {
+    nameExtra = '未分阶段';
+  }
+  const name = `<div class="gantt-phase-name${g.phase ? '' : ' is-loose'}" style="height:${GANTT_PHASE_H}px" data-gantt-phase-toggle="${key}">
+    <span class="gantt-phase-toggle">${collapsed ? '▸' : '▾'}</span>
+    ${g.phase ? `<span class="gp-dot" style="background:${color}"></span>` : ''}
+    <span class="gp-text">${nameExtra}</span>
+    <span class="gp-meta">${meta}${meta ? ' · ' : ''}${prog.done}/${prog.total} · ${prog.pct}%</span>
+  </div>`;
+  const row = `<div class="gantt-row gantt-phase-row" style="height:${GANTT_PHASE_H}px" data-gantt-phase-toggle="${key}">${barRight}</div>`;
+  return { name, row, key };
+}
+
+// 阶段展开/收起（P9.1）：只切换该阶段下属行可见性，不触碰任何事项数据/排序/日期
+function bindGanttPhaseToggle(wrap) {
+  wrap.querySelectorAll('[data-gantt-phase-toggle]').forEach(el => {
+    el.addEventListener('click', () => {
+      const key = el.dataset.ganttPhaseToggle;
+      if (ganttPhaseCollapsed.has(key)) ganttPhaseCollapsed.delete(key);
+      else ganttPhaseCollapsed.add(key);
+      const hide = ganttPhaseCollapsed.has(key);
+      wrap.querySelectorAll(`[data-gphase="${CSS.escape(key)}"]`).forEach(node => {
+        if (hide) node.setAttribute('hidden', ''); else node.removeAttribute('hidden');
+      });
+      wrap.querySelectorAll(`[data-gantt-phase-toggle="${CSS.escape(key)}"] .gantt-phase-toggle`).forEach(t => { t.textContent = hide ? '▸' : '▾'; });
+    });
+  });
+}
 
 // 由若干 [startKey, endKey] 计算甘特时间轴范围：纳入今天、两侧各留 1 天、至少 7 天
 function calcGanttRange(ranges) {
@@ -1965,14 +2071,21 @@ function calcGanttRange(ranges) {
   return { minK, maxK, totalDays: durationDays(minK, maxK) };
 }
 // 单项目甘特图（内联在项目面板中）
+// P9.1：项目含阶段时按"阶段父级行 + 可收起事项行"分层；无阶段项目走原平铺路径（表现不变）
 function buildGantt(project) {
   const allTasks = getProjectTasks(project.id);
   const tasks = allTasks.filter(t => eventStart(t));    // 有日期的上时间轴
   const undated = allTasks.filter(t => !eventStart(t)); // 无日期事项下方单列
+  const phases = Array.isArray(project.phases) ? project.phases : [];
+  const usePhaseGroups = phases.length > 0 || tasks.some(t => t.phaseId);
 
-  // 时间轴范围：所有事项 + 今天，两侧各留 1 天，至少 7 天
+  // 时间轴范围：所有事项 + 阶段日期 + 今天，两侧各留 1 天，至少 7 天
   const tk = dateKey(today());
-  const { minK, totalDays } = calcGanttRange(tasks.map(t => [eventStart(t), eventEnd(t)]));
+  const ranges = tasks.map(t => [eventStart(t), eventEnd(t)]);
+  if (usePhaseGroups) {
+    for (const ph of phases) { if (ph.startDate && ph.endDate) ranges.push([ph.startDate, ph.endDate]); }
+  }
+  const { minK, totalDays } = calcGanttRange(ranges);
   const todayOffset = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
   const innerW = totalDays * GANTT_STATE.dayW;
   const WEEK_CH = '日一二三四五六';
@@ -1983,12 +2096,53 @@ function buildGantt(project) {
 
   // 左侧固定事项名列
   let leftHtml = `<div class="gantt-corner" style="height:${GANTT_HEAD_H}px">事项</div>`;
-  if (tasks.length === 0) {
-    leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
+  let rowsHtml = '';
+
+  if (!usePhaseGroups) {
+    // —— 无阶段：原平铺路径（保持 P9.1 前行为不变）——
+    if (tasks.length === 0) {
+      leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
+      rowsHtml = `<div class="gantt-row" style="height:${GANTT_ROW_H}px"></div>`;
+    } else {
+      for (const t of tasks) {
+        const r = ganttTaskBarHtml(t, minK, { showPhaseTag: true });
+        leftHtml += r.name;
+        rowsHtml += r.bar;
+      }
+    }
   } else {
-    for (const t of tasks) {
-      const recurNote = isRecurOn(t) ? `（${RECUR_FREQ_LABELS[t.recur.freq] || '重复'}重复）` : '';
-      leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title + recurNote)}">${escapeHtml(t.title)}${isRecurOn(t) ? ' 🔁' : ''}</div>`;
+    // —— 阶段分层路径 ——
+    const groups = groupTasksByPhase(project, tasks);
+    const violList = phaseRangeViolations(phases, allTasks);
+    const violMap = new Map(violList.map(v => [v.taskId, v.dir]));
+    let anyRow = false;
+    for (const g of groups) {
+      const isLoose = !g.phase;
+      const color = isLoose ? 'rgba(255,255,255,0.55)' : phaseColor(phases.findIndex(ph => ph.id === g.phase.id));
+      // null 组（未分阶段）在无有日期事项时不渲染组头（无日期事项仍在下方单列显示）
+      if (isLoose && g.tasks.length === 0) continue;
+      anyRow = true;
+      // allTasks 口径用于进度（含无日期事项）
+      g.allTasks = isLoose ? allTasks.filter(t => !t.phaseId || !phases.some(ph => ph.id === t.phaseId))
+                           : allTasks.filter(t => t.phaseId === g.phase.id);
+      const pr = ganttPhaseRowsHtml(g, minK, project.id, color);
+      leftHtml += pr.name;
+      rowsHtml += pr.row;
+      if (g.tasks.length === 0) {
+        const gAttr = ` data-gphase="${pr.key}"${ganttPhaseCollapsed.has(pr.key) ? ' hidden' : ''}`;
+        leftHtml += `<div class="gantt-empty-name under-phase" style="height:${GANTT_ROW_H}px"${gAttr}>${isLoose ? '—' : '0 事项'}</div>`;
+        rowsHtml += `<div class="gantt-row" style="height:${GANTT_ROW_H}px"${gAttr}></div>`;
+      } else {
+        for (const t of g.tasks) {
+          const r = ganttTaskBarHtml(t, minK, { violMap, underPhase: true, groupKey: pr.key });
+          leftHtml += r.name;
+          rowsHtml += r.bar;
+        }
+      }
+    }
+    if (!anyRow) {
+      leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
+      rowsHtml = `<div class="gantt-row" style="height:${GANTT_ROW_H}px"></div>`;
     }
   }
 
@@ -2000,29 +2154,6 @@ function buildGantt(project) {
     headHtml += `<div class="gh-day${key === tk ? ' today' : ''}" style="width:${GANTT_STATE.dayW}px;flex:0 0 ${GANTT_STATE.dayW}px">
       ${d.getMonth() + 1}/${d.getDate()}<span class="gh-wk">${WEEK_CH[d.getDay()]}</span>
     </div>`;
-  }
-
-  // 右侧时间条行
-  let rowsHtml = '';
-  if (tasks.length === 0) {
-    rowsHtml = `<div class="gantt-row" style="height:${GANTT_ROW_H}px"></div>`;
-  } else {
-    for (const t of tasks) {
-      const cat = CATEGORIES[t.category] || CATEGORIES.work;
-      const off = Math.round((parseDateKey(eventStart(t)) - parseDateKey(minK)) / 86400000);
-      const dur = durationDays(eventStart(t), eventEnd(t));
-      // 阶段标签（P8.1）：事项条前显示阶段名小标
-      const phTag = phaseBadgeHtml(t);
-      rowsHtml += `
-        <div class="gantt-row" style="height:${GANTT_ROW_H}px">
-          <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
-               style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${cat.color}55;border-left-color:${cat.color}"
-               title="${escapeHtml(t.title)}（${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
-            ${phTag}<span class="bar-title">${escapeHtml(t.title)}</span>
-            <span class="bar-resize"></span>
-          </div>
-        </div>`;
-    }
   }
 
   wrap.innerHTML = `
@@ -2040,6 +2171,8 @@ function buildGantt(project) {
       </div>
     </div>
   `;
+
+  bindGanttPhaseToggle(wrap);
 
   // 无日期事项
   if (undated.length) {
@@ -2105,10 +2238,13 @@ function buildOverviewGantt() {
     g.dated = g.tasks.filter(t => eventStart(t));
   });
 
-  // 时间轴范围：项目起止区间 + 全部有日期事项 + 今天
+  // 时间轴范围：项目起止区间 + 阶段日期 + 全部有日期事项 + 今天
   const ranges = [];
   for (const g of groups) {
     if (g.p && g.p.startDate) ranges.push([g.p.startDate, g.p.endDate || g.p.startDate]);
+    if (g.p && Array.isArray(g.p.phases)) {
+      for (const ph of g.p.phases) { if (ph.startDate && ph.endDate) ranges.push([ph.startDate, ph.endDate]); }
+    }
     for (const t of g.dated) ranges.push([eventStart(t), eventEnd(t)]);
   }
   const tk = dateKey(today());
@@ -2141,27 +2277,43 @@ function buildOverviewGantt() {
     }
     rowsHtml += `</div>`;
 
-    // 事项行（该组无有日期事项时占位一行）
-    if (g.dated.length === 0) {
-      leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
-      rowsHtml += `<div class="gantt-row" style="height:${GANTT_ROW_H}px"></div>`;
+    // 事项行（P9.1：项目含阶段时按阶段父级行分层；未归类虚拟组与无阶段项目保持平铺）
+    const phases = (g.p && Array.isArray(g.p.phases)) ? g.p.phases : [];
+    const usePhaseGroups = g.p && (phases.length > 0 || g.dated.some(t => t.phaseId));
+    if (!usePhaseGroups) {
+      if (g.dated.length === 0) {
+        leftHtml += `<div class="gantt-empty-name" style="height:${GANTT_ROW_H}px">—</div>`;
+        rowsHtml += `<div class="gantt-row" style="height:${GANTT_ROW_H}px"></div>`;
+      } else {
+        for (const t of g.dated) {
+          const r = ganttTaskBarHtml(t, minK, { pjPrefix: gname, showPhaseTag: true });
+          leftHtml += r.name;
+          rowsHtml += r.bar;
+        }
+      }
     } else {
-      for (const t of g.dated) {
-        const tcat = CATEGORIES[t.category] || CATEGORIES.work;
-        const off = Math.round((parseDateKey(eventStart(t)) - parseDateKey(minK)) / 86400000);
-        const dur = durationDays(eventStart(t), eventEnd(t));
-        const pjPrefix = g.p ? `${escapeHtml(gname)} · ` : '';
-        const recurNote = isRecurOn(t) ? `（${RECUR_FREQ_LABELS[t.recur.freq] || '重复'}重复）` : '';
-        leftHtml += `<div class="gantt-name${t.done ? ' done' : ''}" style="height:${GANTT_ROW_H}px" data-gantt-id="${t.id}" title="${escapeHtml(t.title + recurNote)}">${escapeHtml(t.title)}${isRecurOn(t) ? ' 🔁' : ''}</div>`;
-        rowsHtml += `
-          <div class="gantt-row" style="height:${GANTT_ROW_H}px">
-            <div class="gantt-bar${t.done ? ' done' : ''}" data-gantt-id="${t.id}"
-                 style="left:${off * GANTT_STATE.dayW + 1}px;width:${dur * GANTT_STATE.dayW - 3}px;background:${tcat.color}55;border-left-color:${tcat.color}"
-                 title="${escapeHtml(t.title)}（${pjPrefix}${fmtShort(eventStart(t))}~${fmtShort(eventEnd(t))}，${dur}天）">
-              ${phaseBadgeHtml(t)}<span class="bar-title">${escapeHtml(t.title)}</span>
-              <span class="bar-resize"></span>
-            </div>
-          </div>`;
+      const subGroups = groupTasksByPhase(g.p, g.dated);
+      const violMap = new Map(phaseRangeViolations(phases, g.tasks).map(v => [v.taskId, v.dir]));
+      for (const sg of subGroups) {
+        const isLoose = !sg.phase;
+        if (isLoose && sg.tasks.length === 0) continue;
+        const color = isLoose ? 'rgba(255,255,255,0.55)' : phaseColor(phases.findIndex(ph => ph.id === sg.phase.id));
+        sg.allTasks = isLoose ? g.tasks.filter(t => !t.phaseId || !phases.some(ph => ph.id === t.phaseId))
+                              : g.tasks.filter(t => t.phaseId === sg.phase.id);
+        const pr = ganttPhaseRowsHtml(sg, minK, g.p.id, color);
+        leftHtml += pr.name;
+        rowsHtml += pr.row;
+        if (sg.tasks.length === 0) {
+          const gAttr = ` data-gphase="${pr.key}"${ganttPhaseCollapsed.has(pr.key) ? ' hidden' : ''}`;
+          leftHtml += `<div class="gantt-empty-name under-phase" style="height:${GANTT_ROW_H}px"${gAttr}>0 事项</div>`;
+          rowsHtml += `<div class="gantt-row" style="height:${GANTT_ROW_H}px"${gAttr}></div>`;
+        } else {
+          for (const t of sg.tasks) {
+            const r = ganttTaskBarHtml(t, minK, { violMap, underPhase: true, groupKey: pr.key, pjPrefix: gname });
+            leftHtml += r.name;
+            rowsHtml += r.bar;
+          }
+        }
       }
     }
   }
@@ -2195,6 +2347,7 @@ function buildOverviewGantt() {
   // 全部无日期事项（各项目 + 未归类）在时间轴下方单列
   appendUndated();
 
+  bindGanttPhaseToggle(wrap);
   bindGanttDrag(wrap);
   setupGanttControls(wrap);
   return wrap;
@@ -2733,7 +2886,7 @@ function addPhase(projectId, name) {
   const list = loadProjects();
   const p = list.find(x => x.id === projectId);
   if (!p) return null;
-  const phase = { id: genPhaseId(), name: String(name || '').trim() || '新阶段', order: p.phases.length };
+  const phase = { id: genPhaseId(), name: String(name || '').trim() || '新阶段', order: p.phases.length, startDate: '', endDate: '' };
   p.phases = p.phases || [];
   p.phases.push(phase);
   p.revision = (p.revision || 1) + 1;
@@ -2786,6 +2939,58 @@ function deletePhase(projectId, phaseId) {
   }
   if (changed) saveEvents(all);
   return true;
+}
+// 设置阶段起止日期（P9.1）：仅改阶段自身，绝不自动改动事项日期；倒挂自动交换
+function setPhaseDates(projectId, phaseId, startDate, endDate) {
+  const list = loadProjects();
+  const p = list.find(x => x.id === projectId);
+  if (!p || !Array.isArray(p.phases)) return false;
+  const ph = p.phases.find(x => x.id === phaseId);
+  if (!ph) return false;
+  let s = String(startDate || '');
+  let e = String(endDate || '');
+  if (s && e && e < s) { const t = s; s = e; e = t; }
+  if (ph.startDate === s && ph.endDate === e) return true;
+  ph.startDate = s; ph.endDate = e;
+  p.revision = (p.revision || 1) + 1;
+  p.updatedAt = new Date().toISOString();
+  saveProjects(list);
+  return true;
+}
+// 纯函数（P9.1）：事项按阶段分组。阶段按 order 排列，空阶段保留成组；未分阶段事项归末尾 null 组（有事项才成组）
+function groupTasksByPhase(project, tasks) {
+  const phases = (project && Array.isArray(project.phases)) ? project.phases.slice().sort((a, b) => (a.order || 0) - (b.order || 0)) : [];
+  const groups = phases.map(phase => ({ phase, tasks: [] }));
+  const idx = new Map(phases.map((ph, i) => [ph.id, i]));
+  const loose = [];
+  for (const t of tasks || []) {
+    const gi = t.phaseId ? idx.get(t.phaseId) : undefined;
+    if (gi === undefined) loose.push(t);
+    else groups[gi].tasks.push(t);
+  }
+  if (loose.length) groups.push({ phase: null, tasks: loose });
+  return groups;
+}
+// 纯函数（P9.1）：阶段进度 = 完成事项数 / 阶段内事项总数；空阶段返回 0，杜绝除零
+function phaseProgress(tasks) {
+  const total = (tasks || []).length;
+  const done = (tasks || []).filter(t => t.done).length;
+  return { done, total, pct: total ? Math.round(done / total * 100) : 0 };
+}
+// 纯函数（P9.1）：超范围事项检测。仅当阶段与事项都有日期时判定：
+// 事项结束日 < 阶段开始日 → before；事项开始日 > 阶段结束日 → after
+function phaseRangeViolations(phases, tasks) {
+  const pmap = new Map((phases || []).map(ph => [ph.id, ph]));
+  const out = [];
+  for (const t of tasks || []) {
+    const ph = t.phaseId ? pmap.get(t.phaseId) : null;
+    if (!ph || !ph.startDate || !ph.endDate) continue;
+    const s = eventStart(t), e = eventEnd(t) || s;
+    if (!s) continue;
+    if (e < ph.startDate) out.push({ taskId: t.id, phaseId: ph.id, dir: 'before' });
+    else if (s > ph.endDate) out.push({ taskId: t.id, phaseId: ph.id, dir: 'after' });
+  }
+  return out;
 }
 // 纯函数：获取项目阶段名称映射（{phaseId: name}），便于事项显示阶段标签
 function phaseNameMap(projectId) {
