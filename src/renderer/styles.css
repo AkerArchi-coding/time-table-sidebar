@@ -1370,6 +1370,12 @@ html, body {
 
 /* 快速添加 */
 .qa-input { width: 100%; }
+.qa-hint {
+  font-size: 11px;
+  color: var(--accent-txt);
+  padding: 0 2px;
+  min-height: 0;
+}
 .qa-row { display: flex; gap: 6px; }
 .qa-row > * { flex: 1; min-width: 0; }
 .qa-actions { display: flex; gap: 6px; }
