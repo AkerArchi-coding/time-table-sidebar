@@ -148,13 +148,68 @@ html, body {
 
 /* ============ 展开态：周视图面板 ============ */
 #panel {
-  width: 296px;
-  flex: 0 0 296px;
+  width: var(--panel-w, 296px);
+  flex: 0 0 var(--panel-w, 296px);
   display: none;
   flex-direction: column;
   padding: 12px 12px 8px;
+  position: relative;
+  container-type: inline-size;   /* 容器查询：窄宽度下工具条/tabs 自适应 */
 }
 #sidebar.expanded #panel { display: flex; }
+
+/* ============ 展开 / 收起三角拉手 ============ */
+/* 收起态：窄条垂直居中的展开三角（基准为左侧停靠，指向右；右侧停靠整体翻转） */
+#rail { position: relative; }
+.rail-expand-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(var(--txt-rgb), 0.18);
+  border-radius: 50%;
+  background: rgba(var(--txt-rgb), 0.08);
+  color: rgba(var(--txt-rgb), 0.75);
+  font-size: 9px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity .15s, background .15s;
+  z-index: 2;
+}
+.rail-expand-btn:hover { opacity: 1; background: rgba(var(--accent-rgb), 0.35); }
+#sidebar:not(.side-left) .rail-expand-btn { transform: translate(-50%, -50%) rotate(180deg); }
+/* 展开后窄条三角隐藏：此时面板内缘有收起三角，避免重复入口 */
+#sidebar.expanded .rail-expand-btn { display: none; }
+
+/* 展开态：面板内缘（靠近窄条一侧）垂直居中的收起三角 */
+.panel-collapse-btn {
+  position: absolute;
+  top: 50%;
+  left: -2px;
+  transform: translateY(-50%);
+  width: 14px; height: 42px;
+  display: none;
+  align-items: center; justify-content: center;
+  border: 1px solid rgba(var(--txt-rgb), 0.15);
+  border-radius: 0 7px 7px 0;
+  background: rgba(var(--txt-rgb), 0.10);
+  color: rgba(var(--txt-rgb), 0.7);
+  font-size: 9px;
+  cursor: pointer;
+  z-index: 20;
+}
+.panel-collapse-btn:hover { background: rgba(var(--accent-rgb), 0.4); color: #fff; }
+#sidebar.side-left .panel-collapse-btn { left: auto; right: -2px; border-radius: 7px 0 0 7px; }
+#sidebar.side-left .panel-collapse-btn span { display: inline-block; transform: rotate(180deg); }
+#sidebar.expanded .panel-collapse-btn { display: flex; }
+
+/* 窄宽度（≤70%）自适应：工具条回退单列，避免按钮文字挤压 */
+@container (max-width: 240px) {
+  .tool-strip { grid-template-columns: 1fr; }
+  .view-tabs { overflow-x: auto; }
+}
 
 .panel-header {
   display: flex;
@@ -265,17 +320,16 @@ html, body {
   /* 分类竖条：border-left 由 JS 设置颜色 */
   border-left: 3px solid transparent;
 }
-/* 行内排序：第一行 = 圆点/勾选/时间/标题/删除；第二行 = 各类徽标 */
-.event-item .urgency-dot { order: 1; }
-.event-item .event-check { order: 2; }
-.event-item .event-time { order: 3; }
-.event-item .event-title { order: 4; }
-.event-item .event-del { order: 5; }
-.event-item .event-date-badge,
-.event-item .event-project-badge,
-.event-item .event-phase-badge,
-.event-item .event-tag-badge,
-.event-item .event-ck-badge { order: 6; flex: 0 0 auto; }
+/* 第一行 = 圆点/勾选/时间/标题/删除（DOM 自然顺序）；徽标整体在第二行容器内换行，
+   不再与标题挤同一行导致右侧徽标伸出窗口边缘被裁切 */
+.event-badges {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+}
 .event-item:hover { background: rgba(0, 0, 0, 0.25); }
 .event-item.done { opacity: 0.5; }
 /* 已完成事项：粗横线划掉 */
@@ -1996,6 +2050,50 @@ html, body {
   font-size: 11px;
   color: rgba(var(--txt-rgb),0.45);
   padding: 8px 0 2px;
+}
+/* 设置分类下拉：吸顶在设置滚动区顶部 */
+.set-cat-bar {
+  position: sticky;
+  top: -12px;
+  z-index: 5;
+  background: var(--bg);
+  padding: 10px 0 8px;
+  margin: -2px 0 6px;
+}
+.set-cat-select {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--txt-rgb),0.2);
+  background: rgba(var(--txt-rgb),0.05);
+  color: var(--txt);
+}
+.set-group.hidden { display: none; }
+/* 宽度滑块行 */
+.set-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 150px;
+}
+.set-width-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: rgb(var(--accent-rgb));
+  cursor: pointer;
+}
+.set-range-val {
+  flex: 0 0 42px;
+  text-align: right;
+  font-size: 12px;
+  color: rgba(var(--txt-rgb),0.7);
+  font-variant-numeric: tabular-nums;
+}
+.set-display-select {
+  flex: 0 0 150px;
+  font-size: 12px;
 }
 .set-row {
   display: flex;

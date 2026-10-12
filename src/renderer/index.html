@@ -21,6 +21,8 @@
         <div class="rail-time" id="railTime">--:--</div>
         <div class="rail-date" id="railDate">--</div>
       </div>
+      <!-- 中部展开三角：收起态显式展开入口（方向随停靠侧翻转） -->
+      <button class="rail-expand-btn" id="railExpandBtn" title="展开"><span class="rail-expand-ico">▶</span></button>
       <div class="rail-spacer"></div>
       <div class="rail-group" id="railToolsMid">
         <button class="rail-icon" data-tool="quickadd" title="快速添加"><span>＋</span></button>
@@ -44,6 +46,8 @@
 
     <!-- 展开态：多视图面板 -->
     <div id="panel">
+      <!-- 面板内缘收起三角：展开态显式收起入口（位置/方向随停靠侧翻转） -->
+      <button class="panel-collapse-btn" id="panelCollapseBtn" title="收起"><span>◀</span></button>
       <!-- 视图导航 -->
       <nav class="view-tabs" id="viewTabs">
         <button data-view="today" class="active">今日</button>

@@ -15,10 +15,17 @@ let edgeDwellTimer = null;     // 收起态：鼠标在边缘条带的停留计�
 let fullscreenHidden = false;  // 是否因前台全屏而隐藏
 let editing = false;           // 渲染层正在编辑表单（阻止自动收回）
 let tray = null;               // 系统托盘
-let uiConfig = { side: 'right', mode: 'rail' };  // 侧边栏 UI 配置：停靠侧 + 显示模式（持久化）
+let uiConfig = { side: 'right', mode: 'rail', widthScale: 1 };  // 侧边栏 UI 配置：停靠侧 + 显示模式 + 展开宽度倍率（持久化）
 
 const NARROW_W = 64;           // 收起时宽度
-const EXPANDED_W = 360;        // 展开时宽度
+const EXPANDED_W = 360;        // 展开时宽度（widthScale = 1 基准；设置中 50%–200%）
+const MIN_SCALE = 0.5, MAX_SCALE = 2, SCALE_STEP = 0.1;
+function clampScale(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  const stepped = Math.round(n / SCALE_STEP) * SCALE_STEP;
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(stepped.toFixed(2))));
+}
 const TRIGGER_MARGIN = 6;      // 自动展开触发条带：屏幕最右 6px
 const EDGE_DWELL_MS = 260;     // 鼠标需在触发条带停留多久才展开（防误触）
 const COLLAPSE_DELAY = 450;    // 鼠标离开后多久收回（毫秒）
@@ -141,6 +148,7 @@ function loadUiConfig() {
     const o = JSON.parse(fs.readFileSync(uiConfigPath(), 'utf8'));
     if (o.side === 'left' || o.side === 'right') uiConfig.side = o.side;
     if (o.mode === 'rail' || o.mode === 'mini' || o.mode === 'hidden') uiConfig.mode = o.mode;
+    if (typeof o.widthScale === 'number') uiConfig.widthScale = clampScale(o.widthScale);
     if (typeof o.displayId === 'number') uiConfig.displayId = o.displayId;
   } catch { /* 首次运行或文件损坏 → 保持默认 */ }
 }
@@ -174,11 +182,12 @@ function collapsedRect() {
   }
   return { x, y: wa.y, width: NARROW_W, height: wa.height };
 }
-// 展开态几何：全高面板，贴靠当前停靠侧
+// 展开态几何：全高面板，贴靠当前停靠侧；宽度 = 基准宽 × 用户倍率，并钳制在工作区内
 function expandedRect() {
   const wa = getTargetDisplay().workArea;
-  const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - EXPANDED_W;
-  return { x, y: wa.y, width: EXPANDED_W, height: wa.height };
+  const w = Math.max(NARROW_W, Math.min(Math.round(EXPANDED_W * (uiConfig.widthScale || 1)), wa.width));
+  const x = uiConfig.side === 'left' ? wa.x : wa.x + wa.width - w;
+  return { x, y: wa.y, width: w, height: wa.height };
 }
 
 function sendStateChange() {
@@ -186,7 +195,9 @@ function sendStateChange() {
     sidebar.webContents.send('state-change', {
       expanded,
       side: uiConfig.side,
-      mode: uiConfig.mode
+      mode: uiConfig.mode,
+      widthScale: uiConfig.widthScale || 1,
+      panelW: Math.max(0, expandedRect().width - NARROW_W)   // 已含工作区钳制的真实面板宽
     });
   }
 }
@@ -204,12 +215,34 @@ function applyUiConfig() {
 }
 
 ipcMain.handle('ui-config-get', () => Object.assign({}, uiConfig));
+// 多显示器列表：返回渲染层可用的安全字段（id / 分辨率 / 是否主屏 / 当前选中）
+ipcMain.handle('displays-list', () => {
+  const primary = screen.getPrimaryDisplay();
+  return screen.getAllDisplays().map((d, i) => ({
+    id: d.id,
+    index: i + 1,
+    primary: d.id === primary.id,
+    width: d.bounds.width,
+    height: d.bounds.height,
+    current: d.id === (getTargetDisplay() && getTargetDisplay().id)
+  }));
+});
 ipcMain.on('ui-config-set', (_e, partial) => {
   if (!partial || typeof partial !== 'object') return;
   if (partial.side === 'left' || partial.side === 'right') uiConfig.side = partial.side;
   if (partial.mode === 'rail' || partial.mode === 'mini' || partial.mode === 'hidden') uiConfig.mode = partial.mode;
+  if (partial.widthScale !== undefined) uiConfig.widthScale = clampScale(partial.widthScale);
+  if (partial.displayId !== undefined) {
+    const id = Number(partial.displayId);
+    // 仅接受当前系统中真实存在的显示器，防止离线的旧 id 把窗口定位到虚空
+    if (screen.getAllDisplays().some(d => d.id === id)) uiConfig.displayId = id;
+  }
   saveUiConfig();
   applyUiConfig();
+});
+// 渲染层三角按钮主动收起（与鼠标离开自动收回等价，但立即执行）
+ipcMain.on('request-collapse', () => {
+  if (expanded) collapseSidebar(false);
 });
 
 // ============ 侧边栏窗口 ============
@@ -350,6 +383,8 @@ function checkCursor() {
 // IPC：渲染层点击窄条（图标/空白）时立即展开，绕过边缘停留判定
 ipcMain.on('manual-expand', () => {
   if (edgeDwellTimer) { clearTimeout(edgeDwellTimer); edgeDwellTimer = null; }
+  // hidden 模式下窗口处于 hide：必须先显示再展开，否则会被“鼠标不在窗口内”的收回逻辑立刻收起
+  if (!sidebar.isVisible()) sidebar.showInactive();
   if (!expanded) expandSidebar();
 });
 

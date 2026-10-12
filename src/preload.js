@@ -61,9 +61,13 @@ contextBridge.exposeInMainWorld('timetable', {
     ipcRenderer.on('window-visible', handler);
     return () => ipcRenderer.removeListener('window-visible', handler);
   },
-  // 侧边栏 UI 配置：停靠侧 / 显示模式（主进程持有并持久化）
+  // 侧边栏 UI 配置：停靠侧 / 显示模式 / 宽度倍率 / 目标显示器（主进程持有并持久化）
   uiConfigGet: () => ipcRenderer.invoke('ui-config-get'),
   uiConfigSet: (partial) => ipcRenderer.send('ui-config-set', partial),
+  // 多显示器列表（设置页选择吸附目标）
+  displaysList: () => ipcRenderer.invoke('displays-list'),
+  // 展开态点击三角主动收起
+  requestCollapse: () => ipcRenderer.send('request-collapse'),
   // 备份：导出/导入对话框 + 主进程数据文件存取
   backupGetMainFiles: () => ipcRenderer.invoke('backup-get-main-files'),
   backupSetMainFiles: (payload) => ipcRenderer.invoke('backup-set-main-files', payload),

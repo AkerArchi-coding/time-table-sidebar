@@ -1042,9 +1042,9 @@ function buildEventItem(ev, opts = {}) {
     <span class="urgency-dot" style="background:${urg.color}" title="${urg.label}"></span>
     <span class="event-check" data-id="${ev.id}" title="${ev.done ? '取消完成' : '标记完成'}"></span>
     <span class="event-time">${escapeHtml(ev.time || '')}</span>
-    ${badges}
     <span class="event-title">${(ev.pinned ? '<span class="pin-mark" title="已置顶">📌</span>' : '') + escapeHtml(ev.title)}</span>
     ${ev._templateId ? '' : `<span class="event-del" data-id="${ev.id}" title="删除">×</span>`}
+    ${badges ? `<span class="event-badges">${badges}</span>` : ''}
   `;
   return item;
 }
@@ -7630,7 +7630,16 @@ function saveUiTheme(patch) {
 
 function buildSettings(panel) {
   panel.innerHTML = `
-    <div class="set-group">
+    <div class="set-cat-bar">
+      <select class="set-cat-select" title="设置分类">
+        <option value="dock">侧边栏与显示</option>
+        <option value="appearance">外观</option>
+        <option value="general">通用与提醒</option>
+        <option value="data">数据与备份</option>
+        <option value="sync">设备同步</option>
+      </select>
+    </div>
+    <div class="set-group" data-cat="dock">
       <div class="set-group-title">侧边栏</div>
       <div class="set-row">
         <span class="set-text">
@@ -7640,6 +7649,23 @@ function buildSettings(panel) {
         <span class="set-seg">
           <button type="button" class="seg-btn" data-side="left">左侧</button>
           <button type="button" class="seg-btn" data-side="right">右侧</button>
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">所在显示器</span>
+          <span class="set-desc">多台显示器时，选择吸附到哪台屏幕的侧边</span>
+        </span>
+        <select class="set-display-select" title="目标显示器"></select>
+      </div>
+      <div class="set-row">
+        <span class="set-text">
+          <span class="set-name">展开宽度</span>
+          <span class="set-desc">以默认宽度为 100% 基准，50%–200% 可调，超出屏幕时自动钳制</span>
+        </span>
+        <span class="set-range">
+          <input type="range" class="set-width-range" min="50" max="200" step="10" value="100" title="展开宽度百分比">
+          <span class="set-range-val">100%</span>
         </span>
       </div>
       <div class="set-row">
@@ -7654,7 +7680,7 @@ function buildSettings(panel) {
         </select>
       </div>
     </div>
-    <div class="set-group">
+    <div class="set-group" data-cat="appearance">
       <div class="set-group-title">外观</div>
       <div class="set-row">
         <span class="set-text">
@@ -7674,7 +7700,7 @@ function buildSettings(panel) {
         <span class="accent-dots" id="accentDots"></span>
       </div>
     </div>
-    <div class="set-group">
+    <div class="set-group" data-cat="general">
       <div class="set-group-title">通用</div>
       <label class="set-row">
         <span class="set-text">
@@ -7743,7 +7769,7 @@ function buildSettings(panel) {
         <span class="set-switch"><input type="checkbox" class="set-hotkey-qa" title="Ctrl+Alt+N 打开快速添加"><span class="set-slider"></span></span>
       </label>
     </div>
-    <div class="set-group">
+    <div class="set-group" data-cat="data">
       <div class="set-group-title">数据与备份</div>
       <div class="set-row">
         <span class="set-text">
@@ -7842,7 +7868,7 @@ function buildSettings(panel) {
       </div>
       <div id="autoBackupPanel" class="trash-panel" hidden></div>
     </div>
-    <div class="set-group">
+    <div class="set-group" data-cat="sync">
       <div class="set-group-title">设备同步</div>
       <div class="set-row">
         <span class="set-text">
@@ -7999,17 +8025,60 @@ function buildSettings(panel) {
     });
   }
 
-  // ---- 侧边栏：停靠位置 / 显示模式（主进程持有配置，切换即时生效） ----
+  // ---- 设置分类：顶部下拉切换，只显示对应分组 ----
+  const catSelect = panel.querySelector('.set-cat-select');
+  const catGroups = panel.querySelectorAll('.set-group[data-cat]');
+  const applyCat = (cat) => {
+    catGroups.forEach(g => g.classList.toggle('hidden', g.dataset.cat !== cat));
+  };
+  catSelect.addEventListener('change', () => applyCat(catSelect.value));
+  catSelect.value = 'dock';
+  applyCat('dock');
+
+  // ---- 侧边栏：停靠位置 / 显示模式 / 显示器 / 宽度（主进程持有配置，切换即时生效） ----
   const sideBtns = panel.querySelectorAll('.seg-btn[data-side]');
   const modeSel = panel.querySelector('.set-mode');
+  const displaySel = panel.querySelector('.set-display-select');
+  const widthRange = panel.querySelector('.set-width-range');
+  const widthVal = panel.querySelector('.set-range-val');
   const applyCfg = (cfg) => {
     if (!cfg) return;
     sideBtns.forEach(b => b.classList.toggle('active', b.dataset.side === cfg.side));
     modeSel.value = cfg.mode || 'rail';
+    const pct = Math.round((cfg.widthScale || 1) * 100);
+    widthRange.value = String(pct);
+    widthVal.textContent = pct + '%';
   };
   if (window.timetable && window.timetable.uiConfigGet) {
     window.timetable.uiConfigGet().then(applyCfg).catch(() => { /* 保持默认 */ });
   }
+  // 显示器列表填充：仅一台显示器时下拉禁用并说明
+  if (window.timetable && window.timetable.displaysList && displaySel) {
+    window.timetable.displaysList().then(list => {
+      if (!Array.isArray(list) || !list.length) return;
+      displaySel.innerHTML = list.map(d => {
+        const label = `显示器 ${d.index} · ${d.width}×${d.height}${d.primary ? ' · 主屏' : ''}`;
+        return `<option value="${d.id}">${escapeHtml(label)}</option>`;
+      }).join('');
+      const cur = list.find(d => d.current) || list[0];
+      displaySel.value = String(cur.id);
+      displaySel.disabled = list.length < 2;
+      if (list.length < 2) displaySel.title = '当前仅检测到一台显示器';
+    }).catch(() => { displaySel.disabled = true; });
+    displaySel.addEventListener('change', () => {
+      window.timetable.uiConfigSet({ displayId: Number(displaySel.value) });
+      showToast('侧边栏已移至所选显示器');
+    });
+  } else if (displaySel) {
+    displaySel.disabled = true;
+  }
+  // 宽度滑块：拖动时只更新数字，松手（change）才通知主进程重排窗口，避免逐帧抖动
+  widthRange.addEventListener('input', () => { widthVal.textContent = widthRange.value + '%'; });
+  widthRange.addEventListener('change', () => {
+    if (window.timetable && window.timetable.uiConfigSet) {
+      window.timetable.uiConfigSet({ widthScale: Number(widthRange.value) / 100 });
+    }
+  });
   sideBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const side = btn.dataset.side;
@@ -8891,6 +8960,15 @@ function ensureExpanded() {
   sidebar.classList.add('expanded');
   if (window.timetable) window.timetable.requestExpand();
 }
+// 展开态主动收起：乐观切类 + 通知主进程立即收回
+function requestCollapse() {
+  if (!sidebar.classList.contains('expanded')) return;
+  sidebar.classList.remove('expanded');
+  if (window.timetable && window.timetable.requestCollapse) window.timetable.requestCollapse();
+}
+// 三角拉手：窄条中部展开 / 面板内缘收起（方向随停靠侧由 CSS 翻转）
+$('railExpandBtn').addEventListener('click', (e) => { e.stopPropagation(); ensureExpanded(); });
+$('panelCollapseBtn').addEventListener('click', (e) => { e.stopPropagation(); requestCollapse(); });
 
 // rail：点击空白窄条展开（图标按钮由下方委托处理）
 railEl.addEventListener('click', (e) => {
@@ -8921,6 +8999,10 @@ if (window.timetable) {
     // 停靠侧 / 显示模式：镜像圆角边线 + 迷你态压缩样式
     if (state.side) sidebar.classList.toggle('side-left', state.side === 'left');
     if (state.mode) sidebar.classList.toggle('mini', state.mode === 'mini');
+    // 展开宽度：主进程给的是钳制后的真实面板像素宽（360×倍率 − 64 窄条）
+    if (Number.isFinite(state.panelW) && state.panelW > 0) {
+      sidebar.style.setProperty('--panel-w', state.panelW + 'px');
+    }
   });
   // 启动即应用持久化的 UI 配置（主进程建窗已按配置定位，这里同步渲染层样式类）
   if (window.timetable.uiConfigGet) {
@@ -8928,6 +9010,8 @@ if (window.timetable) {
       if (!cfg) return;
       sidebar.classList.toggle('side-left', cfg.side === 'left');
       sidebar.classList.toggle('mini', cfg.mode === 'mini');
+      const scale = Number(cfg.widthScale) || 1;
+      sidebar.style.setProperty('--panel-w', (Math.round(360 * scale) - 64) + 'px');
     }).catch(() => { /* 主进程不可达时保持默认 */ });
   }
   // 全局快捷键：启动时按持久化设置同步注册（主进程已先按默认注册，这里覆盖为用户设置）
