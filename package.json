@@ -1,6 +1,6 @@
 {
   "name": "timetable-desktop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "桌面内嵌侧边栏日程表",
   "author": "timetable",
   "main": "src/main.js",
@@ -26,7 +26,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/koffi/**"
+      "**/node_modules/koffi/**",
+      "src/services/voice/sapi-recognizer.ps1"
     ],
     "win": {
       "target": [

@@ -1004,7 +1004,9 @@ function buildEventItem(ev, opts = {}) {
   if (isRecurOn(ev)) {
     const r = ev.recur;
     const rl = RECUR_FREQ_LABELS[r.freq] || '重复';
-    badges += `<span class="event-recur-badge" title="${rl}重复${r.until ? '，至 ' + r.until : ''}">🔁</span>`;
+    // 按次数模式徽标显示「共 N 次」，其余显示截止日
+    const rEnd = r.count >= 1 ? `，共 ${r.count} 次` : (r.until ? `，至 ${r.until}` : '');
+    badges += `<span class="event-recur-badge" title="${rl}重复${rEnd}">🔁</span>`;
   }
   // 标签徽标（P3.3）：最多显示 2 个，超出折叠为 +N（悬停看全量）
   if (Array.isArray(ev.tags) && ev.tags.length) {
@@ -1049,6 +1051,137 @@ function buildEventItem(ev, opts = {}) {
   return item;
 }
 
+// ============ 语音输入共享绑定（长按说话，Windows SAPI 离线识别） ============
+// 交互：长按麦克风 ≥500ms 开始识别，识别结束自动写入目标输入框；录音中点击 = 取消。
+// SAPI 为同步识别（Recognize 阻塞 5-8 秒），松开按钮无法中断且保留结果，
+// 故采用"长按开始"而非"按住说话"。全局单例订阅路由到当前发起者，避免表单重建导致订阅泄漏。
+const MIC_SVG_HTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 10a2 2 0 0 0 2-2V4a2 2 0 0 0-4 0v4a2 2 0 0 0 2 2z"/><path d="M11 5v3a3 3 0 0 1-6 0V5H4v3a4 4 0 0 0 3 3.9V14H5v1h6v-1H9v-2.1A4 4 0 0 0 12 8V5h-1z"/></svg>';
+const VOICE_HOLD_MS = 500;
+let voiceActive = null;          // { btn, apply } 当前长按发起识别的表单目标
+let voiceGlobalsBound = false;
+
+// 全局单例订阅：结果 / 状态 / 错误 路由到 voiceActive（谁发起谁接收）
+function ensureVoiceGlobals() {
+  if (voiceGlobalsBound || !window.timetable || !window.timetable.onVoiceResult) return;
+  voiceGlobalsBound = true;
+  window.timetable.onVoiceResult((result) => {
+    const a = voiceActive;
+    if (!a || !result || !result.text) return;
+    voiceActive = null;
+    a.btn.classList.remove('recording');
+    if (a.btn.isConnected) a.apply(result.text);   // 发起按钮已被重建/移除则丢弃结果
+  });
+  window.timetable.onVoiceState((state) => {
+    const a = voiceActive;
+    if (!a) return;
+    if (state === 'idle' || state === 'error') a.btn.classList.remove('recording');
+    else a.btn.classList.add('recording');
+  });
+  window.timetable.onVoiceError((err) => {
+    const a = voiceActive;
+    if (a) { a.btn.classList.remove('recording'); voiceActive = null; }
+    if (err && err.message) showToast(err.message);
+  });
+}
+
+// 绑定一个麦克风按钮：长按开始识别，结果交给 apply(text)；按钮显隐跟随设置开关
+function bindVoiceButton(btn, apply) {
+  if (!btn || !window.timetable || !window.timetable.voiceStart) return;
+  ensureVoiceGlobals();
+  const st = loadAppSettings();
+  btn.hidden = !st.voiceInputEnabled;
+  btn.title = '长按语音输入';
+  let timer = null;
+  const stopTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  btn.addEventListener('pointerdown', () => {
+    if (voiceActive) return;                 // 已有识别进行中（含本按钮录音中）
+    stopTimer();
+    timer = setTimeout(async () => {
+      timer = null;
+      let status;
+      try { status = await window.timetable.voiceGetStatus(); }
+      catch { status = { available: false, message: '语音输入不可用' }; }
+      if (!status.available) { showToast(status.message || '语音输入不可用'); return; }
+      if (voiceActive || !btn.isConnected) return;   // 等待期间状态已变化
+      voiceActive = { btn, apply };
+      btn.classList.add('recording');
+      window.timetable.voiceStart({ language: loadAppSettings().voiceLanguage || 'zh-CN' });
+    }, VOICE_HOLD_MS);
+  });
+  // 未达长按时长即松开：提示交互方式（离开/取消则静默）
+  btn.addEventListener('pointerup', () => {
+    if (timer) { stopTimer(); showToast('长按麦克风按钮开始语音输入'); }
+  });
+  btn.addEventListener('pointerleave', stopTimer);
+  btn.addEventListener('pointercancel', stopTimer);
+  // 录音中点击 = 取消本次识别
+  btn.addEventListener('click', () => {
+    if (voiceActive && voiceActive.btn === btn) {
+      voiceActive = null;
+      btn.classList.remove('recording');
+      if (window.timetable.voiceStop) { try { window.timetable.voiceStop(); } catch {} }
+    }
+  });
+}
+
+// ---- 重复「持续方式」纯函数（预设/按次数 → until 日期；反向识别编辑初值） ----
+// 时长预设 → 截止日（含开始日当天）；跨月/跨年按目标月实际天数钳制（1/31 + 1月 → 2/28），无开始日期返回 ''
+function recurPresetUntil(mode, startKey) {
+  if (!startKey) return '';
+  const d = parseDateKey(startKey);
+  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
+  if (mode === '1w') return dateKey(new Date(y, m, day + 6));
+  if (mode === '1m' || mode === '1y') {
+    const ny = mode === '1y' ? y + 1 : y;
+    const nm = mode === '1y' ? m : m + 1;
+    const dim = new Date(ny, nm + 1, 0).getDate();   // 目标月天数
+    const anniv = Math.min(day, dim);
+    // 正常日期：截止 = 周年日 - 1 天（含开始日恰好覆盖一个周期）；
+    // 目标月无该日号（如 1/31→2 月、闰 2/29→平年）：钳制到月末最后一天
+    return dateKey(new Date(ny, nm, anniv === day ? anniv - 1 : anniv));
+  }
+  return '';
+}
+// 按 N 次（第 N 次出现日 = 截止日）；口径与 recurMatchesDate 一致：
+// weekdays 跳过周末；monthly 跳过无该日号的月份（1/31 起第 2 次 = 3/31）
+function recurCountUntil(freq, startKey, n) {
+  if (!startKey || !Number.isInteger(n) || n < 1) return '';
+  const d = parseDateKey(startKey);
+  if (freq === 'daily') d.setDate(d.getDate() + n - 1);
+  else if (freq === 'weekly') d.setDate(d.getDate() + 7 * (n - 1));
+  else if (freq === 'weekdays') {
+    for (let left = n - 1; left > 0;) {
+      d.setDate(d.getDate() + 1);
+      const w = d.getDay();
+      if (w !== 0 && w !== 6) left--;
+    }
+  } else if (freq === 'monthly') {
+    let y = d.getFullYear(), m = d.getMonth(), left = n - 1;
+    const day = d.getDate();
+    while (left > 0) {
+      m++;
+      const dim = new Date(y, m + 1, 0).getDate();
+      if (day <= dim) left--;    // 该月存在该日号才算一次
+    }
+    return dateKey(new Date(y, m, day));
+  } else return '';
+  return dateKey(d);
+}
+// 编辑预填：由 until/count 反推持续方式。返回 'forever' | '1w' | '1m' | '1y' | 'count' | 'custom'
+function recurModeOf(freq, startKey, untilKey, count) {
+  if (!untilKey) return 'forever';
+  if (count >= 1 && recurCountUntil(freq, startKey, count) === untilKey) return 'count';
+  for (const m of ['1w', '1m', '1y']) {
+    if (recurPresetUntil(m, startKey) === untilKey) return m;
+  }
+  return 'custom';
+}
+// 持续方式 → until 输入框当前值（forever/custom 由调用方决定；count 按当前次数，预设按开始日）
+function recurModeUntilValue(mode, freq, startKey, count) {
+  if (mode === 'count') return recurCountUntil(freq, startKey, count || 1);
+  return recurPresetUntil(mode, startKey);
+}
+
 // 新建/编辑事项表单
 // opts.fixedDate: 日历卡片内新建时预填的日期（仍可修改/延长为区间）
 // opts.fixedProject: 固定项目（项目详情内），无则显示项目下拉
@@ -1067,6 +1200,10 @@ function buildTaskForm(opts = {}) {
   const preRemind = ev ? (ev.remindAhead || 0) : (loadAppSettings().remindAheadDefault || 0);
   const preRecurFreq = ev && ev.recur && RECUR_FREQ_LABELS[ev.recur.freq] ? ev.recur.freq : 'none';
   const preRecurUntil = ev && ev.recur ? (ev.recur.until || '') : '';
+  const preRecurCount = ev && ev.recur ? (ev.recur.count || 0) : 0;
+  // 持续方式初值：按次数（有 count 且与现值吻合）→ 时长预设（until 与预设吻合）→ 永远 / 自定义
+  const preRecurMode = preRecurFreq === 'none' ? 'forever'
+    : recurModeOf(preRecurFreq, preStart, preRecurUntil, preRecurCount);
   const preTags = ev && Array.isArray(ev.tags) ? ev.tags.join(',') : '';
 
   const sel = (val, cur) => val === cur ? ' selected' : '';
@@ -1079,9 +1216,7 @@ function buildTaskForm(opts = {}) {
     <div class="add-form-row1">
       <input type="time" class="ev-time" value="${ev ? (ev.time || '') : ''}" />
       <input type="text" class="ev-title" placeholder="事项标题..." maxlength="40" value="${ev ? escapeHtml(ev.title) : ''}" />
-      <button type="button" class="ev-voice-btn" title="语音输入" aria-label="语音输入" hidden>
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 10a2 2 0 0 0 2-2V4a2 2 0 0 0-4 0v4a2 2 0 0 0 2 2z"/><path d="M11 5v3a3 3 0 0 1-6 0V5H4v3a4 4 0 0 0 3 3.9V14H5v1h6v-1H9v-2.1A4 4 0 0 0 12 8V5h-1z"/></svg>
-      </button>
+      <button type="button" class="ev-voice-btn" title="长按语音输入" aria-label="语音输入" hidden>${MIC_SVG_HTML}</button>
     </div>
     <div class="add-form-row2">
       <select class="ev-category" title="分类">
@@ -1117,7 +1252,18 @@ function buildTaskForm(opts = {}) {
       <select class="ev-recur" title="重复规则（按开始日期起算）">
         ${Object.keys(RECUR_FREQ_LABELS).map(f => `<option value="${f}"${sel(f, preRecurFreq)}>${RECUR_FREQ_LABELS[f]}</option>`).join('')}
       </select>
-      <input type="date" class="ev-recur-until" title="重复截止日期（可留空=一直重复）" value="${preRecurUntil}" />
+      <select class="ev-recur-mode" title="持续时长" ${preRecurFreq === 'none' ? 'hidden' : ''}>
+        <option value="forever"${sel('forever', preRecurMode)}>永远</option>
+        <option value="1w"${sel('1w', preRecurMode)}>一周</option>
+        <option value="1m"${sel('1m', preRecurMode)}>一个月</option>
+        <option value="1y"${sel('1y', preRecurMode)}>一年</option>
+        <option value="count"${sel('count', preRecurMode)}>按次数</option>
+        <option value="custom"${sel('custom', preRecurMode)}>自定义日期</option>
+      </select>
+      <select class="ev-recur-count" title="重复次数（第 N 次后停止）" ${preRecurMode === 'count' ? '' : 'hidden'}>
+        ${[1, 2, 3, 4, 5].map(n => `<option value="${n}"${sel(String(n), String(preRecurCount || 1))}>${n} 次</option>`).join('')}
+      </select>
+      <input type="date" class="ev-recur-until" title="重复截止日期（含当天）" value="${preRecurMode === 'custom' ? preRecurUntil : (preRecurFreq === 'none' ? preRecurUntil : recurModeUntilValue(preRecurMode, preRecurFreq, preStart, preRecurCount))}" ${preRecurMode === 'custom' ? '' : 'hidden'} />
     </div>
     <div class="add-form-row-tags">标签
       <input type="text" class="ev-tags" title="标签，逗号分隔，最多 ${TAG_MAX} 个" placeholder="如：工作, 重要" value="${escapeHtml(preTags)}" />
@@ -1215,14 +1361,6 @@ function bindFormEvents(form) {
   }
   paintCk();
 
-  // 语音输入订阅（关闭表单时统一取消，避免泄漏到下次创建的表单）
-  let voiceUnsub = null, voiceStateUnsub = null, voiceErrUnsub = null;
-  const cleanupVoice = () => {
-    if (voiceUnsub) { try { voiceUnsub(); } catch {} voiceUnsub = null; }
-    if (voiceStateUnsub) { try { voiceStateUnsub(); } catch {} voiceStateUnsub = null; }
-    if (voiceErrUnsub) { try { voiceErrUnsub(); } catch {} voiceErrUnsub = null; }
-  };
-
   const save = () => {
     const title = form.querySelector('.ev-title').value.trim();
     if (!title) return;
@@ -1253,9 +1391,17 @@ function bindFormEvents(form) {
     };
     // 重复规则：不重复存 null；有规则时必须以开始日期为锚（无开始日期的规则不投影）
     const recurFreq = form.querySelector('.ev-recur').value;
-    fields.recur = (recurFreq === 'none')
-      ? null
-      : { freq: recurFreq, interval: 1, until: form.querySelector('.ev-recur-until').value || '' };
+    if (recurFreq === 'none') {
+      fields.recur = null;
+    } else {
+      const recur = { freq: recurFreq, interval: 1, until: form.querySelector('.ev-recur-until').value || '' };
+      // 按次数模式：记录次数用于展示（投影仍以 until 为准，数据模型向后兼容）；
+      // 无开始日期时截止日为空 = 永远重复，此时不记次数
+      if (form.querySelector('.ev-recur-mode').value === 'count' && recur.until) {
+        recur.count = Number(form.querySelector('.ev-recur-count').value) || 1;
+      }
+      fields.recur = recur;
+    }
     // 标签（P3.3）：逗号分隔解析为去重数组；空串存 []
     fields.tags = parseTags(form.querySelector('.ev-tags').value);
     // 子任务（P6.2）：新建表单为空时不写字段（保持"缺省=无子任务"）；编辑表单总是写回（支持删空）
@@ -1265,9 +1411,13 @@ function bindFormEvents(form) {
     closeForm(form);
   };
   const closeForm = (f) => {
-    cleanupVoice();   // 关闭即取消语音订阅 + 停止录音
-    if (window.timetable && window.timetable.voiceStop) {
-      try { window.timetable.voiceStop(); } catch {}
+    // 关闭表单时若正在本表单录音，取消识别（语音订阅为全局单例，无需逐表单清理）
+    if (voiceActive && f.contains(voiceActive.btn)) {
+      voiceActive.btn.classList.remove('recording');
+      voiceActive = null;
+      if (window.timetable && window.timetable.voiceStop) {
+        try { window.timetable.voiceStop(); } catch {}
+      }
     }
     // 编辑表单是独立插入的编辑器块：关闭时整块移除
     if (f.dataset.editId) {
@@ -1289,9 +1439,15 @@ function bindFormEvents(form) {
       else if (s.classList.contains('ev-project')) s.value = '';
       else if (s.classList.contains('ev-remind')) s.value = '0';
       else if (s.classList.contains('ev-recur')) s.value = 'none';
+      else if (s.classList.contains('ev-recur-mode')) s.value = 'forever';
+      else if (s.classList.contains('ev-recur-count')) s.value = '1';
     });
+    const recurModeSel = f.querySelector('.ev-recur-mode');
+    const recurCountSel = f.querySelector('.ev-recur-count');
+    if (recurModeSel) recurModeSel.hidden = true;    // 重复=不重复时隐藏持续方式
+    if (recurCountSel) recurCountSel.hidden = true;
     const recurUntil = f.querySelector('.ev-recur-until');
-    if (recurUntil) recurUntil.value = '';
+    if (recurUntil) { recurUntil.value = ''; recurUntil.hidden = true; }
     const tagsEl = f.querySelector('.ev-tags');
     if (tagsEl) tagsEl.value = '';
     ckItems = [];                 // 子任务一并重置（新建表单复用）
@@ -1300,47 +1456,13 @@ function bindFormEvents(form) {
     if (window.timetable) window.timetable.setEditing(false);
   };
 
-  // ---- 语音输入按钮（仅当设置开关开启时显示并启用） ----
+  // ---- 语音输入按钮（长按开始；显隐跟随设置开关） ----
   const voiceBtn = form.querySelector('.ev-voice-btn');
   const titleEl = form.querySelector('.ev-title');
-  if (voiceBtn && titleEl && window.timetable && window.timetable.onVoiceResult) {
-    const st = loadAppSettings();
-    if (st.voiceInputEnabled) voiceBtn.hidden = false;
-
-    voiceBtn.addEventListener('click', async () => {
-      if (!window.timetable.voiceGetStatus || !window.timetable.voiceStart) return;
-      // 正在录音：点击即停止
-      if (voiceBtn.classList.contains('recording')) {
-        window.timetable.voiceStop();
-        return;
-      }
-      // 检查可用性
-      let status;
-      try { status = await window.timetable.voiceGetStatus(); }
-      catch { status = { available: false, message: '语音输入不可用' }; }
-      if (!status.available) { showToast(status.message || '语音输入不可用'); return; }
-      // 启动识别
-      voiceBtn.classList.add('recording');
-      window.timetable.voiceStart({ language: st.voiceLanguage || 'zh-CN' });
-    });
-
-    // 识别结果 → 填入标题（仅当前可见表单接收）
-    voiceUnsub = window.timetable.onVoiceResult((result) => {
-      if (form.classList.contains('hidden')) return;
-      if (!result || !result.text) return;
-      titleEl.value = result.text;
+  if (voiceBtn && titleEl) {
+    bindVoiceButton(voiceBtn, (text) => {
+      titleEl.value = text;
       titleEl.focus();
-      voiceBtn.classList.remove('recording');
-    });
-    // 状态变化 → 按钮态
-    voiceStateUnsub = window.timetable.onVoiceState((state) => {
-      if (state === 'idle' || state === 'error') voiceBtn.classList.remove('recording');
-      else if (state === 'processing' || state === 'recording') voiceBtn.classList.add('recording');
-    });
-    // 错误提示
-    voiceErrUnsub = window.timetable.onVoiceError((err) => {
-      voiceBtn.classList.remove('recording');
-      if (err && err.message) showToast(err.message);
     });
   }
 
@@ -1351,6 +1473,35 @@ function bindFormEvents(form) {
     projectSel.addEventListener('change', () => {
       const pid = projectSel.value;
       phaseSel.innerHTML = '<option value="">未分阶段</option>' + phaseOptionsHtml(pid, '');
+    });
+  }
+
+  // ---- 重复持续方式联动：模式/次数/频率/开始日变化时重算截止日 ----
+  const recurSel = form.querySelector('.ev-recur');
+  const recurModeSel = form.querySelector('.ev-recur-mode');
+  const recurCountSel = form.querySelector('.ev-recur-count');
+  const recurUntilEl = form.querySelector('.ev-recur-until');
+  if (recurSel && recurModeSel && recurCountSel && recurUntilEl) {
+    const startInput = form.querySelector('.ev-start');
+    const syncRecurMode = () => {
+      const mode = recurModeSel.value;
+      recurCountSel.hidden = mode !== 'count';
+      recurUntilEl.hidden = mode !== 'custom';
+      if (mode !== 'custom') {
+        recurUntilEl.value = recurModeUntilValue(mode, recurSel.value, startInput.value, Number(recurCountSel.value));
+      }
+    };
+    recurModeSel.addEventListener('change', syncRecurMode);
+    recurCountSel.addEventListener('change', syncRecurMode);
+    // 频率变化：切换行的显隐；按次数模式依赖频率，需重算截止日
+    recurSel.addEventListener('change', () => {
+      recurModeSel.hidden = recurSel.value === 'none';
+      syncRecurMode();
+    });
+    // 开始日变化：预设/按次数按新开始日重算；自定义日期不动（保护手输值）
+    startInput.addEventListener('change', () => {
+      if (!recurUntilEl.hidden) return;
+      recurUntilEl.value = recurModeUntilValue(recurModeSel.value, recurSel.value, startInput.value, Number(recurCountSel.value));
     });
   }
 
@@ -1521,7 +1672,10 @@ function buildProjectForm() {
   const form = document.createElement('div');
   form.className = 'project-form hidden';
   form.innerHTML = `
-    <input type="text" class="pj-name" placeholder="项目标题" maxlength="30" />
+    <div class="pj-name-row">
+      <input type="text" class="pj-name" placeholder="项目标题" maxlength="30" />
+      <button type="button" class="ev-voice-btn pj-voice-btn" title="长按语音输入" aria-label="语音输入" hidden>${MIC_SVG_HTML}</button>
+    </div>
     <input type="text" class="pj-desc" placeholder="项目简介" maxlength="100" />
     <div class="add-form-row-date">
       <input type="date" class="pj-start" title="开始日期（可留空）" />
@@ -1548,6 +1702,13 @@ function buildProjectForm() {
   // 起止日期互相钳制
   const startEl = form.querySelector('.pj-start');
   const endEl = form.querySelector('.pj-end');
+
+  // 语音输入：长按说话，识别文字填入项目标题
+  bindVoiceButton(form.querySelector('.pj-voice-btn'), (text) => {
+    const nameEl = form.querySelector('.pj-name');
+    nameEl.value = text;
+    nameEl.focus();
+  });
   startEl.addEventListener('change', () => {
     if (startEl.value && (!endEl.value || endEl.value < startEl.value)) endEl.value = startEl.value;
   });
@@ -1589,6 +1750,14 @@ function openProjectForm(projectId, form) {
 }
 
 function closeProjectForm(f) {
+  // 关闭时若正在本表单录音，取消识别
+  if (voiceActive && f.contains(voiceActive.btn)) {
+    voiceActive.btn.classList.remove('recording');
+    voiceActive = null;
+    if (window.timetable && window.timetable.voiceStop) {
+      try { window.timetable.voiceStop(); } catch {}
+    }
+  }
   f.classList.add('hidden');
   delete f.dataset.editId;
   f.querySelectorAll('input').forEach(i => i.value = '');
@@ -5634,7 +5803,10 @@ function buildQuickAdd(panel) {
   panel.innerHTML = `
     <div class="tool-hint">回车快速保存，可连续添加；默认归属今天</div>
     <div class="qa-tpl-holder"></div>
-    <input type="text" class="qa-input" maxlength="60" placeholder="要做点什么？（支持「明天下午3点半」等写法）" />
+    <div class="qa-input-row">
+      <input type="text" class="qa-input" maxlength="60" placeholder="要做点什么？（支持「明天下午3点半」等写法）" />
+      <button type="button" class="ev-voice-btn qa-voice-btn" title="长按语音输入" aria-label="语音输入" hidden>${MIC_SVG_HTML}</button>
+    </div>
     <div class="qa-hint" hidden></div>
     <div class="qa-row">
       <input type="time" class="qa-time" title="时间（可选）" />
@@ -5677,6 +5849,13 @@ function buildQuickAdd(panel) {
     }
   };
   titleEl.addEventListener('input', applyParse);
+
+  // 语音输入：长按说话，结果写入标题并触发实时解析回填（日期/时间/预览）
+  bindVoiceButton(panel.querySelector('.qa-voice-btn'), (text) => {
+    titleEl.value = text;
+    titleEl.dispatchEvent(new Event('input'));
+    titleEl.focus();
+  });
 
   // 模板 chips（P5.3）：点击预填整表单（标题/时间/分类/紧急度），右键删除该模板；
   // 只重绘 holder 容器，不重建面板（避免清掉正在输入的标题）
@@ -6745,6 +6924,7 @@ function buildNotes(panel) {
   panel.innerHTML = `
     <textarea class="notes-area" maxlength="5000" placeholder="随手记点什么…（每行一条，自动保存；可逐行或批量转为事项）"></textarea>
     <div class="notes-toolbar">
+      <button type="button" class="ev-voice-btn notes-voice-btn" title="长按语音输入（追加到便签末尾）" aria-label="语音输入" hidden>${MIC_SVG_HTML}</button>
       <button type="button" class="notes-btn notes-sel" disabled title="先在便签中选中文字">选区转事项</button>
       <button type="button" class="notes-btn notes-all">全部转事项</button>
       <button type="button" class="notes-btn notes-to-qa" title="取第一行非空文字，预填到快速添加（原便签保留）">发到快速添加</button>
@@ -6782,6 +6962,16 @@ function buildNotes(panel) {
   ta.addEventListener('select', updateSelBtn);
   ta.addEventListener('mouseup', updateSelBtn);
   ta.addEventListener('keyup', updateSelBtn);
+
+  // 语音输入：长按说话，识别文字作为新行追加到便签末尾（触发 input 走自动保存）
+  bindVoiceButton(panel.querySelector('.notes-voice-btn'), (text) => {
+    const cur = ta.value;
+    ta.value = cur ? (cur.endsWith('\n') ? cur + text : cur + '\n' + text) : text;
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  });
+
   selBtn.addEventListener('click', () => notesSelectionToEvent(ta));
   panel.querySelector('.notes-all').addEventListener('click', () => {
     clearTimeout(notesSaveTimer);

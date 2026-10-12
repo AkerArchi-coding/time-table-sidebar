@@ -1,4 +1,4 @@
-﻿* { box-sizing: border-box; margin: 0; padding: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ============ 主题变量（P4.1）：暗色为默认值，body.light 整体翻转为亮色 ============
    --txt-rgb / --accent-rgb 为 RGB 三元组，供 rgba(var(--txt-rgb), α) 分层派生；
@@ -453,6 +453,16 @@ html, body {
   50%      { box-shadow: 0 0 0 4px rgba(220, 70, 70, 0); }
 }
 .ev-voice-btn[hidden] { display: none; }
+/* 项目表单内的麦克风按钮：抵消 .project-form button 的全局按钮样式 */
+.project-form .pj-voice-btn {
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(var(--txt-rgb), 0.15);
+  background: rgba(var(--txt-rgb), 0.08);
+  color: rgba(var(--txt-rgb), 0.7);
+}
+.project-form .pj-voice-btn:hover { background: rgba(var(--txt-rgb), 0.16); color: var(--txt); }
 /* 第二行：分类 + 紧急程度 */
 .add-form-row2 {
   display: flex;
@@ -1587,6 +1597,8 @@ html, body {
 .tool-panel textarea::placeholder { color: rgba(var(--txt-rgb), 0.35); }
 
 /* 快速添加 */
+.qa-input-row, .pj-name-row { display: flex; gap: 4px; align-items: center; }
+.qa-input-row .qa-input, .pj-name-row .pj-name { flex: 1; min-width: 0; width: auto; }
 .qa-input { width: 100%; }
 .qa-hint {
   font-size: 11px;
@@ -2328,10 +2340,14 @@ html, body {
 .add-form-row-recur {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   font-size: 11px;
   color: rgba(var(--txt-rgb), 0.6);
 }
+/* 持续方式/次数/截止日按模式互斥显隐 */
+.add-form-row-recur select[hidden],
+.add-form-row-recur input[hidden] { display: none; }
 .add-form-row-recur select,
 .add-form-row-recur input {
   padding: 2px 4px;

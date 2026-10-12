@@ -1034,7 +1034,17 @@ ipcMain.on('autostart-set', (_e, on) => {
 // ============ 语音输入（Windows SAPI 5，System.Speech） ============
 // 通过 PowerShell 子进程调用 SAPI，stdin 发指令、stdout 收 JSON 结果。
 // 隐私：SAPI 在本机识别，音频不出本机；PS 子进程退出即释放资源。
-const VOICE_PS_PATH = path.join(__dirname, 'services', 'voice', 'sapi-recognizer.ps1');
+// 打包后 __dirname 位于 app.asar 虚拟归档内，PowerShell 子进程无法读取 asar 路径
+// （fs.existsSync 经 Electron 补丁仍返回 true，但 spawn 出去的外部进程读不到），
+// 需改用 electron-builder asarUnpack 解出的 app.asar.unpacked 实文件。
+const VOICE_PS_PATH = (() => {
+  const p = path.join(__dirname, 'services', 'voice', 'sapi-recognizer.ps1');
+  if (p.includes('app.asar')) {
+    const unpacked = p.replace('app.asar', 'app.asar.unpacked');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return p;
+})();
 let voiceProc = null;            // 当前 PS 子进程（启动后保留，复用多次识别）
 let voiceState = 'idle';         // 当前状态：idle / recording / processing / error
 let voiceLang = 'zh-CN';
