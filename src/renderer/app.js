@@ -752,6 +752,15 @@ function sortEvents(list) {
   });
 }
 
+// 置顶优先（P10.1）：pinned 项排最前（按 pinnedAt 倒序，后置顶在上），其余保持原相对顺序
+// 仅显示层排序，不改任何数据；项目卡与事项列表渲染用
+function withPinnedFirst(list) {
+  const pin = [], rest = [];
+  for (const it of list) (it && it.pinned ? pin : rest).push(it);
+  pin.sort((a, b) => (b.pinnedAt || '').localeCompare(a.pinnedAt || ''));
+  return [...pin, ...rest];
+}
+
 // ---- 单日事项排序（仅显示层，不改任何任务数据；甘特图走 sortEvents 不受影响） ----
 // by: 'start' 开始时间(time) / 'end' 结束日期(endDate，本项目无结束时刻字段) / 'urgency' 重要程度
 function loadDaySort() {
@@ -1034,7 +1043,7 @@ function buildEventItem(ev, opts = {}) {
     <span class="event-check" data-id="${ev.id}" title="${ev.done ? '取消完成' : '标记完成'}"></span>
     <span class="event-time">${escapeHtml(ev.time || '')}</span>
     ${badges}
-    <span class="event-title">${escapeHtml(ev.title)}</span>
+    <span class="event-title">${(ev.pinned ? '<span class="pin-mark" title="已置顶">📌</span>' : '') + escapeHtml(ev.title)}</span>
     ${ev._templateId ? '' : `<span class="event-del" data-id="${ev.id}" title="删除">×</span>`}
   `;
   return item;
@@ -2106,7 +2115,7 @@ function renderProjects() {
   block.appendChild(form);
   weekList.appendChild(block);
 
-  const projects = loadProjects();
+  const projects = withPinnedFirst(loadProjects());
   if (projects.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
@@ -2126,7 +2135,7 @@ function renderProjects() {
     card.innerHTML = `
       <div class="pj-head">
         <span class="pj-arrow">▸</span>
-        <div class="project-name">${escapeHtml(p.name)}</div>
+        <div class="project-name">${(p.pinned ? '<span class="pin-mark" title="已置顶">📌</span>' : '') + escapeHtml(p.name)}</div>
       </div>
       ${p.description ? `<div class="project-desc">${escapeHtml(p.description)}</div>` : ''}
       ${progressBarHtml(done, total)}
@@ -2977,7 +2986,7 @@ function buildBatchBar(all) {
 }
 
 function renderTasks() {
-  const all = sortEvents(loadEvents());
+  const all = withPinnedFirst(sortEvents(loadEvents()));
   // 标签筛选（P3.3）：筛选态只改显示集合，批量计数/标题仍基于全量
   const shown = tagFilter ? filterByTag(all, tagFilter) : all;
   setHeader('全部事项', batchMode ? `已选 ${batchSel.size} 项` : (tagFilter ? `筛选 ${shown.length}/${all.length} 项` : `共 ${all.length} 项`), false);
@@ -3121,6 +3130,27 @@ function toggleDone(id) {
     bumpProjectRevision(ev.projectId);
     render();
   }
+}
+
+// 置顶/取消置顶（P10.1）：仅本机显示偏好——不进同步快照（normTaskSnap 白名单外）、
+// 不递增 revision、不更新 updatedAt，避免触发三方合并与局域网同步 diff
+function toggleEventPin(id) {
+  const all = loadEvents();
+  const ev = all.find(e => e.id === id);
+  if (!ev) return;
+  if (ev.pinned) { delete ev.pinned; delete ev.pinnedAt; }
+  else { ev.pinned = true; ev.pinnedAt = new Date().toISOString(); }
+  saveEvents(all);
+  render();
+}
+function toggleProjectPin(pid) {
+  const all = loadProjects();
+  const p = all.find(x => x.id === pid);
+  if (!p) return;
+  if (p.pinned) { delete p.pinned; delete p.pinnedAt; }
+  else { p.pinned = true; p.pinnedAt = new Date().toISOString(); }
+  saveProjects(all);
+  render();
 }
 
 // 将事项移动到指定日期：多日事项整体平移（保持持续天数），单日事项直接改期；
@@ -7732,7 +7762,7 @@ function buildSettings(panel) {
           <button type="button" class="set-btn" id="settingsImportBtn">导入</button>
         </span>
       </div>
-      <div class="set-row">
+      <div class="set-row stack">
         <span class="set-text">
           <span class="set-name">② 导出项目文件（.prj）</span>
           <span class="set-desc">用途：单项目分享与项目级同步。包含：所选项目、阶段 Phase、所属事项、优先级与日期。不含未归类事项及其他项目数据；导入保留稳定 ID、有冲突检测，不会无提示覆盖。</span>
@@ -8570,6 +8600,7 @@ function showEventMenu(x, y, eventId) {
   ctxItems.innerHTML = `
     <div class="ctx-item" data-action="toggle">${doneLabel}</div>
     <div class="ctx-item" data-action="edit">编辑事项${isVirtual ? '（重复系列）' : ''}</div>
+    <div class="ctx-item" data-action="pin">${ev.pinned ? '取消置顶' : '置顶'}</div>
     <div class="ctx-item" data-action="pomo">开始番茄钟</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-action="move">将完成时间调整到</div>
@@ -8581,6 +8612,7 @@ function showEventMenu(x, y, eventId) {
   bindItemHandlers({
     toggle: () => toggleDone(eventId),   // 复合 id → 按日 override；普通事项行为不变
     edit: () => openTaskEditor(ev),
+    pin: () => toggleEventPin(templateId),
     pomo: () => {
       POMO.taskId = templateId;
       POMO.taskTitle = ev.title;
@@ -8609,12 +8641,14 @@ function showProjectMenu(x, y, projectId) {
   showItems(x, y);
   ctxItems.innerHTML = `
     <div class="ctx-item" data-action="edit">编辑项目</div>
+    <div class="ctx-item" data-action="pin">${(getProject(projectId) || {}).pinned ? '取消置顶' : '置顶'}</div>
     <div class="ctx-item" data-action="export">导出项目文件</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item danger" data-action="delete">删除项目</div>
   `;
   bindItemHandlers({
     edit: () => editProjectViaForm(projectId),
+    pin: () => toggleProjectPin(projectId),
     export: () => exportProjectFile(projectId),
     delete: () => deleteProject(projectId)
   });

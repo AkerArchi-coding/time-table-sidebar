@@ -1,4 +1,4 @@
-﻿* { box-sizing: border-box; margin: 0; padding: 0; }
+﻿﻿* { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ============ 主题变量（P4.1）：暗色为默认值，body.light 整体翻转为亮色 ============
    --txt-rgb / --accent-rgb 为 RGB 三元组，供 rgba(var(--txt-rgb), α) 分层派生；
@@ -1293,6 +1293,14 @@ html, body {
 .trash-clear { margin-top: 2px; align-self: flex-end; }
 /* 自动备份管理行内按钮组（P7.2） */
 .autobackup-btns { display: inline-flex; gap: 6px; align-items: center; flex-shrink: 0; }
+
+/* P10.1 置顶标记（项目卡 / 事项标题前） */
+.pin-mark { margin-right: 4px; font-size: 11px; }
+
+/* P10.1 导出项目行：文字与控件分两行，避免下拉框挤压左侧说明文字 */
+.set-row.stack { flex-wrap: wrap; }
+.set-row.stack .set-text { flex: 1 1 100%; }
+.set-row.stack .autobackup-btns { flex: 1 1 100%; justify-content: flex-end; }
 
 /* P9.4 数据与备份：项目下拉 + 高级折叠区 */
 .set-select {
