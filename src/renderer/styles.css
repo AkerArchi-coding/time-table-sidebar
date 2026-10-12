@@ -2105,9 +2105,9 @@ html, body {
   cursor: pointer;
 }
 .set-row:last-child { border-bottom: none; }
-.set-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.set-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .set-name { font-size: 13px; color: rgba(var(--txt-rgb),0.92); }
-.set-desc { font-size: 10.5px; color: rgba(var(--txt-rgb),0.42); line-height: 1.4; }
+.set-desc { font-size: 10.5px; color: rgba(var(--txt-rgb),0.42); line-height: 1.4; word-break: break-word; }
 /* 拨动开关 */
 .set-switch {
   position: relative;
