@@ -1045,9 +1045,14 @@ const VOICE_PS_PATH = (() => {
   }
   return p;
 })();
-let voiceProc = null;            // 当前 PS 子进程（启动后保留，复用多次识别）
-let voiceState = 'idle';         // 当前状态：idle / recording / processing / error
+let voiceProc = null;            // 当前 PS 子进程（启动后常驻，复用多轮识别）
+let voiceState = 'idle';         // 当前状态：idle / processing / error
 let voiceLang = 'zh-CN';
+let voiceBusy = false;           // 一轮监听在途（start .. 结果/结束）
+let voicePendingStart = false;   // 进程尚未 ready 时的待发 start
+let voiceStaleDone = 0;          // 在途 stop 的 listen_done 计数：吞掉与新会话竞态的陈旧收尾
+let voiceWatchdog = null;        // 单轮监听看门狗：PS 静默自停失效时的兜底
+let voiceQuitting = false;       // 应用退出中，不再拉起新进程
 
 function voiceSend(channel, payload) {
   if (sidebar && !sidebar.isDestroyed()) {
@@ -1064,6 +1069,106 @@ function voiceKillProc() {
     try { voiceProc.kill(); } catch {}
     voiceProc = null;
   }
+}
+function voiceClearWatchdog() {
+  if (voiceWatchdog) { clearTimeout(voiceWatchdog); voiceWatchdog = null; }
+}
+// 单轮监听兜底超时：正常情况下 PS 6 秒静默会自发 listen_done，此处仅防进程卡死
+function voiceArmWatchdog() {
+  voiceClearWatchdog();
+  voiceWatchdog = setTimeout(() => {
+    voiceWatchdog = null;
+    if (!voiceBusy) return;
+    voiceBusy = false;
+    voicePendingStart = false;
+    voiceSend('voice-error', { code: 'no_speech', message: '未识别到语音' });
+    voiceSetState('idle');
+    if (voiceProc && !voiceProc.killed && voiceProc.stdin && !voiceProc.stdin.destroyed) {
+      try { voiceProc.stdin.write('stop\n'); voiceStaleDone++; } catch { voiceKillProc(); }
+    }
+  }, 25000);
+}
+// 异步协议下 stdout 事件解析（spawn 与复用共用）
+function voiceAttachStdout(proc) {
+  let buf = '';
+  proc.stdout.on('data', (chunk) => {
+    buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.event === 'ready') {
+          // 引擎就绪（未占用麦克风）：有待发 start 则立即开麦（冷启动场景）
+          if (voicePendingStart) {
+            voicePendingStart = false;
+            try { proc.stdin.write('start\n'); } catch {}
+            voiceSetState('processing');
+          }
+        } else if (msg.event === 'recognized') {
+          if (voiceBusy) {
+            voiceBusy = false;
+            voiceClearWatchdog();
+            voiceSend('voice-result', { text: msg.text, isFinal: true, confidence: msg.confidence || 0 });
+            voiceSetState('idle');
+            try { proc.stdin.write('stop\n'); } catch {}   // 首条即收；本轮已终结，PS 不会再回包
+          }
+          // busy=false 时的多余短句（stop 前已入队）直接丢弃
+        } else if (msg.event === 'listen_done') {
+          // 陈旧收尾（上一轮 stop 的迟到回包）：吞掉，不影响新会话
+          if (voiceStaleDone > 0) { voiceStaleDone--; }
+          else if (voiceBusy) {
+            voiceBusy = false;
+            voiceClearWatchdog();
+            voiceSend('voice-error', { code: 'no_speech', message: '未识别到语音' });
+            voiceSetState('idle');
+          }
+          // busy=false：主动取消场景（voice-stop 已清位），静默
+        } else if (msg.event === 'fatal') {
+          voiceBusy = false;
+          voicePendingStart = false;
+          voiceClearWatchdog();
+          voiceSend('voice-error', { code: 'recognize_failed', message: msg.error || '引擎初始化失败' });
+          voiceSetState('error');
+          voiceKillProc();
+        }
+      } catch { /* 非 JSON 行忽略 */ }
+    }
+  });
+}
+
+// 拉起常驻 PS 子进程并完成引擎初始化（幂等；识别指令经 stdin 发送）
+function voiceSpawn() {
+  if (voiceProc || voiceQuitting) return;
+  if (process.platform !== 'win32' || !fs.existsSync(VOICE_PS_PATH)) return;
+  try {
+    voiceProc = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive',
+      '-File', VOICE_PS_PATH,
+      '-Lang', voiceLang
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    voiceProc = null;
+    voiceSend('voice-error', { code: 'spawn_failed', message: String(e && e.message || e) });
+    voiceSetState('error');
+    return;
+  }
+  voiceAttachStdout(voiceProc);
+  voiceProc.stderr.on('data', () => { /* PS 诊断信息，不暴露给渲染层 */ });
+  voiceProc.on('exit', () => {
+    voiceProc = null;
+    voiceBusy = false;
+    voicePendingStart = false;
+    voiceClearWatchdog();
+    if (voiceState !== 'error') voiceSetState('idle');
+  });
+  voiceProc.on('error', (err) => {
+    voiceSend('voice-error', { code: 'proc_error', message: String(err && err.message || err) });
+    voiceSetState('error');
+    voiceProc = null;
+  });
 }
 
 ipcMain.handle('voice-status', async () => {
@@ -1085,79 +1190,44 @@ ipcMain.on('voice-start', (_e, options) => {
     voiceSend('voice-error', { code: 'not_installed', message: '语音识别脚本缺失' });
     return;
   }
-  voiceLang = (options && options.language) || 'zh-CN';
+  const lang = (options && options.language) || 'zh-CN';
+  if (lang !== voiceLang && voiceProc) {
+    // 语言变化需重启引擎（引擎按启动语言绑定识别器）
+    voiceKillProc();
+  }
+  voiceLang = lang;
+  voiceBusy = true;
+  voicePendingStart = true;
+  voiceSetState('processing');
+  voiceArmWatchdog();
 
-  // 已有进程：复用，发送 start 指令触发单次识别
-  if (voiceProc && !voiceProc.killed && voiceProc.stdin && !voiceProc.stdin.destroyed) {
+  const alive = voiceProc && !voiceProc.killed && voiceProc.stdin && !voiceProc.stdin.destroyed;
+  if (alive) {
+    // 常驻进程直接开麦（毫秒级），等待中的 pendingStart 置位仅对冷启动生效
+    voicePendingStart = false;
     try {
       voiceProc.stdin.write('start\n');
-      voiceSetState('processing');
+      return;
     } catch {
       voiceKillProc();
-      // 下方会重启
     }
-    if (voiceProc) return;
   }
-
-  // 启动新 PS 子进程
-  try {
-    voiceProc = spawn('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive',
-      '-File', VOICE_PS_PATH,
-      '-Lang', voiceLang
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
-  } catch (e) {
-    voiceSend('voice-error', { code: 'spawn_failed', message: String(e && e.message || e) });
-    voiceSetState('error');
-    return;
-  }
-
-  let buf = '';
-  voiceProc.stdout.on('data', (chunk) => {
-    buf += chunk.toString('utf8');
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.event === 'ready') {
-          // 进程就绪：发送 start 触发首次识别
-          try { voiceProc.stdin.write('start\n'); } catch {}
-          voiceSetState('processing');
-        } else if (msg.event === 'recognized') {
-          voiceSend('voice-result', { text: msg.text, isFinal: true, confidence: msg.confidence || 0 });
-          voiceSetState('idle');
-        } else if (msg.event === 'no_speech') {
-          voiceSend('voice-error', { code: 'no_speech', message: '未识别到语音' });
-          voiceSetState('idle');
-        } else if (msg.event === 'error') {
-          voiceSend('voice-error', { code: 'recognize_failed', message: msg.error || '识别失败' });
-          voiceSetState('idle');   // 单次识别失败不致命，保留进程待下次
-        } else if (msg.event === 'fatal') {
-          voiceSend('voice-error', { code: 'recognize_failed', message: msg.error || '引擎初始化失败' });
-          voiceSetState('error');
-          voiceKillProc();
-        }
-      } catch { /* 非 JSON 行忽略 */ }
-    }
-  });
-  voiceProc.stderr.on('data', () => { /* PS 诊断信息，不暴露给渲染层 */ });
-  voiceProc.on('exit', () => {
-    if (voiceState !== 'error') voiceSetState('idle');
-    voiceProc = null;
-  });
-  voiceProc.on('error', (err) => {
-    voiceSend('voice-error', { code: 'proc_error', message: String(err && err.message || err) });
-    voiceSetState('error');
-    voiceProc = null;
-  });
+  // 冷启动：spawn 后 ready 事件回调里补发 start
+  voiceSpawn();
 });
 
 ipcMain.on('voice-stop', () => {
-  // 同步识别模式无法中断单次识别；kill 子进程以强制结束，下次 start 会重启
-  voiceKillProc();
+  // 主动取消：停止监听并释放麦克风，进程保留待复用（无需杀进程冷启动）
+  const wasBusy = voiceBusy;
+  voiceBusy = false;
+  voicePendingStart = false;
+  voiceClearWatchdog();
+  if (voiceProc && !voiceProc.killed && voiceProc.stdin && !voiceProc.stdin.destroyed) {
+    try {
+      voiceProc.stdin.write('stop\n');
+      if (wasBusy) voiceStaleDone++;   // 会话在途时 PS 会回 listen_done，配平吞咽
+    } catch { voiceKillProc(); }
+  }
   voiceSetState('idle');
 });
 
@@ -1287,6 +1357,11 @@ app.whenReady().then(() => {
   applyHotkeys();               // 全局快捷键：默认注册唤出键（渲染层加载后同步设置覆盖）
   startFullscreenCheck();
 
+  // 预热语音识别进程：冷启动 Add-Type 编译 + SAPI 引擎初始化约 2.5s，
+  // 若等首次按下才拉起，用户开口时麦克风还没开，会错过 6s 静默窗口 → NOSPEECH。
+  // 提前 3s 常驻，长按时毫秒级开麦。
+  setTimeout(() => { if (!voiceQuitting) voiceSpawn(); }, 3000);
+
   // 多显示器：显示器增删/分辨率变化时重新定位侧边栏
   screen.on('display-added', () => { applyUiConfig(); });
   screen.on('display-metrics-changed', () => { applyUiConfig(); });
@@ -1317,6 +1392,8 @@ app.on('before-quit', () => {
   app.isQuiting = true;
   try { globalShortcut.unregisterAll(); } catch { /* 退出阶段反注册失败可忽略 */ }
   try { syncServer.stopServer(); } catch { /* 同步服务关停失败可忽略 */ }
+  voiceQuitting = true;
+  voiceKillProc();   // 收掉常驻语音识别子进程
 });
 
 app.on('window-all-closed', () => {

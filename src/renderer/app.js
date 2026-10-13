@@ -1092,9 +1092,12 @@ function bindVoiceButton(btn, apply) {
   btn.hidden = !st.voiceInputEnabled;
   btn.title = '长按语音输入';
   let timer = null;
+  let gestureSeq = 0;        // pointer 手势序号：区分「发起长按的松开 click」与「录音中主动取消 click」
+  let lastDownGesture = 0;   // 最近一次按下的手势号（click 事件无手势上下文，借助它判断归属）
   const stopTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
   btn.addEventListener('pointerdown', () => {
-    if (voiceActive) return;                 // 已有识别进行中（含本按钮录音中）
+    lastDownGesture = ++gestureSeq;
+    if (voiceActive) return;                 // 已有识别进行中：本次松开的 click 将作为取消手势
     stopTimer();
     timer = setTimeout(async () => {
       timer = null;
@@ -1103,7 +1106,7 @@ function bindVoiceButton(btn, apply) {
       catch { status = { available: false, message: '语音输入不可用' }; }
       if (!status.available) { showToast(status.message || '语音输入不可用'); return; }
       if (voiceActive || !btn.isConnected) return;   // 等待期间状态已变化
-      voiceActive = { btn, apply };
+      voiceActive = { btn, apply, gesture: gestureSeq };   // 记录发起手势，供 click 判断归属
       btn.classList.add('recording');
       window.timetable.voiceStart({ language: loadAppSettings().voiceLanguage || 'zh-CN' });
     }, VOICE_HOLD_MS);
@@ -1114,9 +1117,11 @@ function bindVoiceButton(btn, apply) {
   });
   btn.addEventListener('pointerleave', stopTimer);
   btn.addEventListener('pointercancel', stopTimer);
-  // 录音中点击 = 取消本次识别
+  // 录音中点击 = 取消本次识别。
+  // 注意：发起长按后的松开也会派发 click（lastDownGesture === voiceActive.gesture），必须忽略，
+  // 否则识别刚启动就被误杀（此前"没有反应"的根因）。
   btn.addEventListener('click', () => {
-    if (voiceActive && voiceActive.btn === btn) {
+    if (voiceActive && voiceActive.btn === btn && lastDownGesture !== voiceActive.gesture) {
       voiceActive = null;
       btn.classList.remove('recording');
       if (window.timetable.voiceStop) { try { window.timetable.voiceStop(); } catch {} }
