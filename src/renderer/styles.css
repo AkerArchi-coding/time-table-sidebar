@@ -583,6 +583,11 @@ html, body {
   background: rgba(var(--txt-rgb), 0.08);
   color: rgba(var(--txt-rgb), 0.45);
 }
+/* V3：阶段未分配标签，与项目未归类同色系（低对比度提示） */
+.event-phase-badge.phase-none {
+  background: rgba(var(--txt-rgb), 0.06);
+  color: rgba(var(--txt-rgb), 0.45);
+}
 /* 阶段徽标（P8.1）：与项目徽标同色系，略浅 */
 .event-phase-badge {
   background: rgba(114, 46, 209, 0.20);
@@ -770,6 +775,134 @@ html, body {
 }
 .project-card.expanded { background: rgba(var(--txt-rgb), 0.08); }
 .project-card.expanded .pj-arrow { transform: rotate(90deg); }
+/* V3：项目完成勾选框 + 完成状态视觉 */
+.pj-complete {
+  flex: 0 0 auto;
+  width: 18px; height: 18px;
+  border: 1.5px solid rgba(var(--txt-rgb), 0.35);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1;
+  color: transparent;
+  cursor: pointer;
+  transition: all .15s;
+  margin-left: auto;
+}
+.pj-complete:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.15); }
+.pj-complete.checked {
+  background: rgba(126, 211, 168, 0.85);
+  border-color: rgba(126, 211, 168, 0.85);
+  color: #fff;
+}
+.project-card.completed { opacity: 0.55; }
+.project-card.completed .project-name { text-decoration: line-through; text-decoration-color: rgba(var(--txt-rgb), 0.4); }
+/* V3：阶段完成勾选框 */
+.ph-complete {
+  flex: 0 0 auto;
+  width: 16px; height: 16px;
+  border: 1.5px solid rgba(var(--txt-rgb), 0.35);
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; line-height: 1;
+  color: transparent;
+  cursor: pointer;
+  transition: all .15s;
+}
+.ph-complete:hover { border-color: var(--accent); }
+.ph-complete.checked {
+  background: rgba(126, 211, 168, 0.85);
+  border-color: rgba(126, 211, 168, 0.85);
+  color: #fff;
+}
+.phase-item.completed .phase-name { text-decoration: line-through; opacity: 0.6; }
+/* V3：新建阶段内联表单 + 阶段描述 */
+.phase-add-form {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-top: 6px; padding: 6px;
+  background: rgba(var(--txt-rgb), 0.05);
+  border-radius: 6px;
+}
+.phase-add-form.hidden { display: none; }
+.phase-add-form input[type=text], .phase-add-form textarea {
+  width: 100%; min-width: 0;
+  background: rgba(var(--bg-rgb), 0.6);
+  border: 1px solid rgba(var(--txt-rgb), 0.2);
+  border-radius: 4px;
+  color: var(--txt);
+  padding: 4px 6px; font-size: 11px;
+}
+.phase-add-form textarea { resize: vertical; font-family: inherit; }
+.phase-new-dates { display: flex; align-items: center; gap: 4px; }
+.phase-new-dates input[type=date] { flex: 1; min-width: 0; }
+.phase-new-ops { display: flex; gap: 6px; }
+.phase-new-ops button {
+  flex: 1; border: none; border-radius: 4px;
+  padding: 4px 8px; font-size: 11px; cursor: pointer;
+}
+.phase-new-save { background: var(--accent); color: #fff; }
+.phase-new-cancel { background: rgba(var(--txt-rgb), 0.15); color: var(--txt); }
+.phase-desc {
+  font-size: 10px; color: rgba(var(--txt-rgb), 0.5);
+  margin-top: 2px; padding-left: 4px;
+}
+/* V3.2：子任务进度静态徽标（替代 .event-expand 折叠控件） */
+.event-checklist-badge {
+  flex: 0 0 auto;
+  font-size: 10px; line-height: 1;
+  color: rgba(var(--txt-rgb), 0.55);
+  background: rgba(var(--txt-rgb), 0.06);
+  padding: 2px 5px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+/* V3：事项子任务风琴式展开（V3.2 已弃用，保留 CSS 以兼容历史 DOM） */
+.event-expand {
+  flex: 0 0 auto;
+  width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; line-height: 1;
+  color: rgba(var(--txt-rgb), 0.5);
+  cursor: pointer;
+  transition: transform .15s;
+  user-select: none;
+}
+.event-expand:hover { color: var(--accent); }
+.event-expand.open { transform: rotate(90deg); }
+.event-subtasks {
+  flex: 1 1 100%; width: 100%;        /* 独占一行，不被 .event-badges 挤压 */
+  padding: 4px 8px 6px 28px;
+  border-top: 1px dashed rgba(var(--txt-rgb), 0.1);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.event-subtasks.hidden { display: none; }
+.subtask-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: rgba(var(--txt-rgb), 0.75);
+}
+.subtask-check {
+  flex: 0 0 auto; width: 14px; height: 14px;
+  border: 1.5px solid rgba(var(--txt-rgb), 0.3);
+  border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; color: transparent;
+  cursor: pointer;
+}
+.subtask-check.done {
+  background: rgba(126, 211, 168, 0.85);
+  border-color: rgba(126, 211, 168, 0.85);
+  color: #fff;
+}
+.subtask-title.done { text-decoration: line-through; opacity: 0.5; }
+/* V3：事项信息标签不截断 + 水平滚动 */
+.event-badges {
+  display: flex; align-items: center; gap: 4px;
+  flex-wrap: nowrap; overflow-x: auto; max-width: 100%;
+  scrollbar-width: thin;
+}
+.event-badges::-webkit-scrollbar { height: 3px; }
+.event-badges::-webkit-scrollbar-thumb { background: rgba(var(--txt-rgb), 0.2); border-radius: 2px; }
+.event-project-badge, .event-phase-badge { white-space: nowrap; flex-shrink: 0; }
+.event-pri-badge { white-space: nowrap; flex-shrink: 0; font-weight: 600; }
 .project-inline {
   display: flex;
   flex-direction: column;
@@ -1299,11 +1432,45 @@ html, body {
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.error { background: rgba(120, 40, 44, 0.95); border-color: rgba(255, 128, 128, 0.4); }
+/* V3：事项到期提醒改为屏幕右下角弹窗（360px 宽，自适应高度，多行换行不溢出） */
 .toast.toast-remind {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  left: auto;
+  transform: none;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 12px;
   pointer-events: auto;
+}
+.toast.toast-remind.show { transform: none; }   /* 覆盖 .toast.show 的 translateX(-50%) */
+.toast.toast-remind .toast-msg {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.toast-remind-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  font-size: 11px;
+  color: rgba(var(--txt-rgb), 0.75);
+}
+.toast-remind-meta .rm-label {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(var(--txt-rgb), 0.10);
+  white-space: nowrap;
+}
+.toast-remind-meta .rm-pri { font-weight: 600; }
+.toast-remind-meta .rm-time { width: 100%; }
+.toast-remind-acts {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 4px;
 }
 .toast-snooze, .toast-done, .toast-stop {
   background: rgba(var(--accent-rgb), 0.3);
@@ -3227,4 +3394,107 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
+}
+
+/* V3：已完成归档区（项目/阶段/事项通用；3 天规则；不删数据，仅视图分离） */
+.archive-section {
+  margin: 8px 0 4px;
+  border: 1px dashed rgba(var(--txt-rgb), 0.18);
+  border-radius: 6px;
+  background: rgba(var(--txt-rgb), 0.03);
+}
+.archive-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: rgba(var(--txt-rgb), 0.7);
+  cursor: pointer;
+  user-select: none;
+}
+.archive-head:hover { color: var(--accent); }
+.archive-head .archive-toggle {
+  display: inline-block;
+  width: 12px; text-align: center;
+  transition: transform .15s;
+}
+.archive-head.open .archive-toggle { transform: rotate(90deg); }
+.archive-head .archive-count {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(var(--txt-rgb), 0.10);
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.55);
+}
+.archive-list {
+  padding: 4px 8px 8px;
+  display: flex; flex-direction: column; gap: 4px;
+  border-top: 1px dashed rgba(var(--txt-rgb), 0.10);
+}
+.archive-list .archive-meta {
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.5);
+  margin-left: auto;
+  white-space: nowrap;
+}
+/* ============ V3.2：项目内联面板按阶段分组（事项列表） ============ */
+.phase-grouped .phase-group {
+  margin: 4px 0 8px;
+  border-left: 2px solid rgba(var(--txt-rgb), 0.08);
+  padding-left: 8px;
+}
+.phase-grouped .phase-group.no-phase {
+  border-left-color: rgba(var(--txt-rgb), 0.06);
+  opacity: 0.85;
+}
+.phase-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 4px;
+  font-size: 11px;
+  color: rgba(var(--txt-rgb), 0.6);
+}
+.phase-group-dot {
+  flex: 0 0 auto;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.phase-group-name {
+  flex: 1;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.phase-group-name.muted {
+  color: rgba(var(--txt-rgb), 0.4);
+  font-weight: 500;
+}
+.phase-group-count {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: rgba(var(--txt-rgb), 0.45);
+  background: rgba(var(--txt-rgb), 0.06);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.phase-group-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* V3.2：✎ 项目按钮在 sub-tabs 行内（不参与 flex:1，靠右） */
+.sub-tabs button.info-edit-btn {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 5px 10px;
+  margin-left: auto;
+  color: rgba(var(--txt-rgb), 0.55);
+}
+.sub-tabs button.info-edit-btn:hover {
+  color: var(--accent-txt);
+  background: rgba(var(--accent-rgb), 0.2);
 }
