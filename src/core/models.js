@@ -43,6 +43,7 @@
     if (p.updatedAt === undefined) p.updatedAt = p.createdAt || '';
     // 阶段（P8.1）：[{id, name, order, startDate, endDate, description, isCompleted, completedAt}]
     if (!Array.isArray(p.phases)) p.phases = [];
+    p.phases = p.phases.filter(ph => ph && typeof ph === 'object');   // 过滤 null/非对象脏数据
     for (const ph of p.phases) {
       if (ph.startDate === undefined) ph.startDate = '';
       if (ph.endDate === undefined) ph.endDate = '';

@@ -63,11 +63,16 @@
   function loadEvents() {
     if (eventsCache) return eventsCache;
     try {
-      const list = JSON.parse(localStorage.getItem('events') || '[]');
+      const raw = JSON.parse(localStorage.getItem('events') || '[]');
+      const list = Array.isArray(raw) ? raw : [];
       const migrate = TTCore.models.migrateEvent;
-      for (const ev of list) migrate(ev);
-      eventsCache = list;
-      return list;
+      const valid = [];
+      for (const ev of list) {
+        if (!ev || typeof ev !== 'object') continue;          // 跳过无效记录
+        try { migrate(ev); valid.push(ev); } catch { /* 单条迁移失败不影响其余 */ }
+      }
+      eventsCache = valid;
+      return valid;
     } catch { eventsCache = []; return eventsCache; }
   }
   function saveEvents(list) {
@@ -81,11 +86,16 @@
   function loadProjects() {
     if (projectsCache) return projectsCache;
     try {
-      const list = JSON.parse(localStorage.getItem('projects') || '[]');
+      const raw = JSON.parse(localStorage.getItem('projects') || '[]');
+      const list = Array.isArray(raw) ? raw : [];
       const migrate = TTCore.models.migrateProject;
-      for (const p of list) migrate(p);
-      projectsCache = list;
-      return list;
+      const valid = [];
+      for (const p of list) {
+        if (!p || typeof p !== 'object') continue;          // 跳过无效记录
+        try { migrate(p); valid.push(p); } catch { /* 单条迁移失败不影响其余 */ }
+      }
+      projectsCache = valid;
+      return valid;
     } catch { projectsCache = []; return projectsCache; }
   }
   function saveProjects(list) {
