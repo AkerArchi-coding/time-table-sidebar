@@ -1,0 +1,9 @@
+{
+  "appId": "com.timetable.mobile",
+  "appName": "日程表",
+  "webDir": "www",
+  "backgroundColor": "#1c1f26",
+  "android": {
+    "allowMixedContent": false
+  }
+}

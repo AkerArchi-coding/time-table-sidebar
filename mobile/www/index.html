@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>日程表</title>
+  <link rel="stylesheet" href="styles-mobile.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- M0 核心层：与桌面端同一套 src/core（sync-core.js 镜像拷贝，勿手改） -->
+  <script src="core/constants.js"></script>
+  <script src="core/dates.js"></script>
+  <script src="core/ids.js"></script>
+  <script src="core/models.js"></script>
+  <script src="core/storage.js"></script>
+  <script src="core/checklist.js"></script>
+  <script src="core/tags.js"></script>
+  <script src="core/ical.js"></script>
+  <script src="core/nlp.js"></script>
+  <script src="core/templates.js"></script>
+  <script src="core/analytics.js"></script>
+  <script src="core/ops-tasks.js"></script>
+  <script src="core/ops-projects.js"></script>
+  <script src="core/backup-core.js"></script>
+  <script src="core/index.js"></script>
+  <script src="platform-mobile.js"></script>
+  <script src="app-mobile.js"></script>
+</body>
+</html>

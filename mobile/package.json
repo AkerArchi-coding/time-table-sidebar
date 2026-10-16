@@ -1,0 +1,19 @@
+{
+  "name": "timetable-mobile",
+  "version": "0.1.0",
+  "description": "日程表手机端（Capacitor），复用 src/core 业务逻辑",
+  "private": true,
+  "scripts": {
+    "sync": "node sync-core.js",
+    "build:android": "npm run sync && cap sync android",
+    "build:ios": "npm run sync && cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0"
+  }
+}
