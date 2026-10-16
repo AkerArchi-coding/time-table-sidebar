@@ -16,6 +16,18 @@ const vm = require('node:vm');
 const APP_JS = path.join(__dirname, '..', 'src', 'renderer', 'app.js');
 const source = fs.readFileSync(APP_JS, 'utf8');
 
+// M0 核心层：必须先于 app.js 加载（与 tests/helpers.js 保持一致）
+const CORE_DIR = path.join(__dirname, '..', 'src', 'core');
+const CORE_FILES = [
+  'constants.js', 'dates.js',
+  'ids.js', 'storage.js', 'models.js',
+  'checklist.js', 'tags.js', 'ical.js', 'nlp.js',
+  'templates.js', 'analytics.js',
+  'ops-tasks.js', 'ops-projects.js',
+  'backup-core.js',
+  'index.js'
+];
+
 // ---- 桩：内存版 localStorage ----
 function memStorage() {
   const map = new Map();
@@ -100,6 +112,21 @@ function loadApp() {
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  // M0：先按序加载存在的 core 模块
+  for (const f of CORE_FILES) {
+    const p = path.join(CORE_DIR, f);
+    if (!fs.existsSync(p)) continue;
+    try {
+      vm.runInContext(fs.readFileSync(p, 'utf8'), sandbox, { filename: 'core/' + f });
+    } catch (e) {
+      sandbox.__coreError = e;
+    }
+  }
+  // M0 渲染层平台门面（先于 app.js；app.js 经 TTPlatform 注入宿主能力）
+  const PLATFORM_JS = path.join(__dirname, '..', 'src', 'renderer', 'platform.js');
+  if (fs.existsSync(PLATFORM_JS)) {
+    vm.runInContext(fs.readFileSync(PLATFORM_JS, 'utf8'), sandbox, { filename: 'renderer/platform.js' });
+  }
   try {
     vm.runInContext(source, sandbox, { filename: 'app.js' });
   } catch (e) {

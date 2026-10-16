@@ -7,13 +7,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { loadApp, appEval, hostify } = require('./helpers');
 
-const BACKUP_JS = path.join(__dirname, '..', 'src', 'renderer', 'backup.js');
+const BACKUP_JS = path.join(__dirname, '..', 'src', 'core', 'backup-core.js');
 const backupSrc = fs.readFileSync(BACKUP_JS, 'utf8');
 
-// 在加载 app.js 的同一沙箱里再跑 backup.js（生产页面也是两个 script 同域共享 window/localStorage）
+// 在加载 app.js 的同一沙箱里再跑 backup-core.js（生产页面也是两个 script 同域共享 window/localStorage）
 function loadBoth() {
   const h = loadApp();
-  vm.runInContext(backupSrc, h.sb, { filename: 'backup.js' });
+  vm.runInContext(backupSrc, h.sb, { filename: 'backup-core.js' });
   return h;
 }
 

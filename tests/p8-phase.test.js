@@ -14,7 +14,7 @@ function seedLegacyProject(sb, p) {
   const base = { id: 'p1', name: '旧版项目', category: 'work', priority: 'medium' };
   const data = Object.assign({}, base, p);
   appEval(sb, `localStorage.setItem('projects', JSON.stringify([${JSON.stringify(data)}]))`);
-  appEval(sb, `projectsCache = null`);   // 清空缓存，强制 loadProjects 重新读取并迁移
+  appEval(sb, `invalidateDerivedCaches()`);   // 清空缓存，强制 loadProjects 重新读取并迁移
 }
 // 造一个基础事项
 function seedEvent(sb, ev) {
@@ -26,7 +26,7 @@ function seedLegacyEvent(sb, ev) {
   const base = { id: 'e1', title: '旧版事项', startDate: '2026-10-10', endDate: '2026-10-10', category: 'work', urgency: 'normal', done: false };
   const data = Object.assign({}, base, ev);
   appEval(sb, `localStorage.setItem('events', JSON.stringify([${JSON.stringify(data)}]))`);
-  appEval(sb, `eventsCache = null`);
+  appEval(sb, `invalidateDerivedCaches()`);
 }
 
 test('loadProjects 迁移：无 phases 字段时补空数组，有 phases 时保留', () => {
@@ -38,7 +38,7 @@ test('loadProjects 迁移：无 phases 字段时补空数组，有 phases 时保
   assert.strictEqual(p1.phases.length, 0);
   // 有 phases
   appEval(sb, `saveProjects([{id:'p2', name:'有阶段', phases:[{id:'ph1', name:'设计', order:0}]}])`);
-  appEval(sb, `projectsCache = null`);
+  appEval(sb, `invalidateDerivedCaches()`);
   const p2 = hostify(appEval(sb, `loadProjects()[0]`));
   assert.strictEqual(p2.phases.length, 1);
   assert.strictEqual(p2.phases[0].name, '设计');

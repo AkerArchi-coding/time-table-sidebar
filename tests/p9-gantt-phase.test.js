@@ -7,7 +7,7 @@ const { loadApp, appEval, hostify } = require('./helpers');
 // 直接往 localStorage 写项目数据（绕过缓存），随后强制重载
 function seedProjectsRaw(sb, arr) {
   appEval(sb, `localStorage.setItem('projects', JSON.stringify(${JSON.stringify(arr).replace(/`/g, '\\`')}))`);
-  appEval(sb, `projectsCache = null`);
+  appEval(sb, `invalidateDerivedCaches()`);
 }
 function seedEvents(sb, arr) {
   appEval(sb, `saveEvents(${JSON.stringify(arr)})`);

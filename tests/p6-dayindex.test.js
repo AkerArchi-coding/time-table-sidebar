@@ -89,11 +89,10 @@ test('排序口径保持：索引结果仍走 sortDayEvents（时间升序）', 
 
 test('notifyStorageFail：10s 节流（重复失败只提示一次的计数口径）', () => {
   const { sb } = loadApp();
-  // 直接验证节流状态机：首次调用更新 storageWarnedAt
-  const before = appEval(sb, 'storageWarnedAt');
+  // 注入计数用 toast，观察节流行为（首次提示、窗口内不再提示）
+  appEval(sb, `globalThis.__toastCount = 0; TTCore.storage.configure({ toast: function(){ globalThis.__toastCount++; } })`);
   appEval(sb, `notifyStorageFail(new Error('QuotaExceeded'))`);
-  const first = appEval(sb, 'storageWarnedAt');
-  assert.ok(first >= before, '首次失败记录时间戳');
+  assert.strictEqual(appEval(sb, 'globalThis.__toastCount'), 1, '首次失败提示一次');
   appEval(sb, `notifyStorageFail(new Error('QuotaExceeded'))`);
-  assert.strictEqual(appEval(sb, 'storageWarnedAt'), first, '节流窗口内不重复更新');
+  assert.strictEqual(appEval(sb, 'globalThis.__toastCount'), 1, '节流窗口内不重复提示');
 });

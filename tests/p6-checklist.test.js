@@ -71,13 +71,14 @@ test('旧数据兼容：无 checklist 字段的事项 progress 为 null 且可�
   assert.strictEqual(ev.checklist.length, 1, '旧数据可后补子任务');
 });
 
-test('buildEventItem：有子任务显示进度角标，全完成带 all 类', () => {
+test('buildEventItem：有子任务默认显示进度徽标与子任务列表，无子任务不显示', () => {
   const { sb } = loadApp();
+  // V3.2：子任务进度改为静态徽标（.event-checklist-badge），子任务列表默认直接显示，不折叠
   const html1 = appEval(sb, `buildEventItem({ id: 'a', title: 't', time: '', category: 'work', urgency: 'normal', done: false, checklist: [{ id: '1', text: 'x', done: true }, { id: '2', text: 'y', done: false }] }).innerHTML`);
-  assert.ok(html1.includes('event-ck-badge') && html1.includes('▸1/2'), '显示 1/2 角标');
-  assert.ok(!html1.includes('event-ck-badge all'), '未全完成不带 all');
+  assert.ok(html1.includes('event-checklist-badge') && html1.includes('1/2'), '显示静态徽标与 1/2 进度');
+  assert.ok(html1.includes('event-subtasks') && !html1.includes('event-subtasks hidden'), '子任务列表默认直接显示，不折叠');
   const html2 = appEval(sb, `buildEventItem({ id: 'a', title: 't', time: '', category: 'work', urgency: 'normal', done: false, checklist: [{ id: '1', text: 'x', done: true }] }).innerHTML`);
-  assert.ok(html2.includes('event-ck-badge all'), '全完成带 all 类');
+  assert.ok(html2.includes('event-checklist-badge') && html2.includes('1/1'), '全完成仍显示徽标与 1/1 进度');
   const html3 = appEval(sb, `buildEventItem({ id: 'a', title: 't', time: '', category: 'work', urgency: 'normal', done: false }).innerHTML`);
-  assert.ok(!html3.includes('event-ck-badge'), '无子任务无角标');
+  assert.ok(!html3.includes('event-checklist-badge') && !html3.includes('event-subtasks'), '无子任务不显示徽标与子任务列表');
 });

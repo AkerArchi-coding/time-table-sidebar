@@ -1,23 +1,10 @@
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
-// ============ 分类 & 紧急程度配置 ============
-const CATEGORIES = {
-  work:    { label: '工作',     color: '#4a90d9' },   // 蓝色
-  personal:{ label: '个人事务', color: '#9b59b6' },   // 紫色
-  family:  { label: '家庭事务', color: '#8b6914' }    // 棕色
-};
-const URGENCIES = {
-  urgent: { label: '紧急', color: '#e74c3c' },   // 红色
-  normal: { label: '一般', color: '#f1c40f' },   // 黄色
-  loose:  { label: '松散', color: '#2ecc71' }    // 绿色
-};
-// 项目优先级（三档枚举，默认中）
-const PRIORITIES = {
-  high:   { label: '高优先', color: '#e74c3c' },
-  medium: { label: '中优先', color: '#f1c40f' },
-  low:    { label: '低优先', color: '#2ecc71' }
-};
-function projectPriority(p) { return PRIORITIES[p && p.priority] || PRIORITIES.medium; }
+// ============ 分类 & 紧急程度配置（M0：单一数据源在 src/core/constants.js） ============
+const CATEGORIES = TTCore.constants.CATEGORIES;
+const URGENCIES = TTCore.constants.URGENCIES;
+const PRIORITIES = TTCore.constants.PRIORITIES;
+function projectPriority(p) { return TTCore.constants.projectPriority(p); }
 
 const $ = (id) => document.getElementById(id);
 const sidebar = $('sidebar');
@@ -40,129 +27,53 @@ const PAGE_STEP = 7;           // 翻页步长
 let currentView = 'today';         // today | projects | tasks | calendar
 let expandedProjectId = null;      // 项目页同层展开的项目 id（手风琴，同时只展开一个）
 const projectDetailModes = {};     // 各项目内联面板的子模式：list | gantt（默认 list）
-let calendarMode = 'calendar';     // 日历页显示模式：calendar（日历）| gantt（总览甘特）| month（月历，P4.2）
+let calendarMode = 'gantt';       // V3：日历页默认显示总览甘特图（曾为 calendar）；calendar（日历）| gantt（总览甘特）| month（月历，P4.2）
 let monthAnchor = new Date();      // 月历当前锚点（仅年月有效，P4.2）
 let syncState = null;              // 项目文件同步预览状态（导入/合并进行中，switchView 时清除）
 let currentTool = null;            // 当前打开的侧边栏工具（内容区覆盖层），null=显示视图
+const expandedSubtasks = new Set();  // V3：事项子任务风琴式展开状态（事项 id 集合，渲染期读，跨重渲染保留）
 
-// ============ 日期工具 ============
-function pad2(n) { return String(n).padStart(2, '0'); }
-function dateKey(d) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-function stripTime(d) {
-  const r = new Date(d);
-  r.setHours(0, 0, 0, 0);
-  return r;
-}
-function addDays(d, n) {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
-function isSameDay(a, b) {
-  return a.getFullYear() === b.getFullYear() &&
-         a.getMonth() === b.getMonth() &&
-         a.getDate() === b.getDate();
-}
-function today() { return new Date(); }
+// ============ 日期工具（M0：单一数据源在 src/core/dates.js） ============
+function pad2(n) { return TTCore.dates.pad2(n); }
+function dateKey(d) { return TTCore.dates.dateKey(d); }
+function stripTime(d) { return TTCore.dates.stripTime(d); }
+function addDays(d, n) { return TTCore.dates.addDays(d, n); }
+function isSameDay(a, b) { return TTCore.dates.isSameDay(a, b); }
+function today() { return TTCore.dates.today(); }
 
-// ============ 日期区间工具 ============
-// 'YYYY-MM-DD' → 本地零点 Date（避免 new Date(str) 的 UTC 偏移）
-function parseDateKey(key) {
-  if (!key) return null;
-  const [y, m, d] = key.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-// 日期 key 加减天数
-function addDaysKey(key, n) {
-  return dateKey(addDays(parseDateKey(key), n));
-}
-// 持续天数：首尾都计入，9/15～9/15 = 1，9/15～9/20 = 6
-function durationDays(startKey, endKey) {
-  if (!startKey && !endKey) return 0;
-  const s = startKey || endKey, e = endKey || startKey;
-  return Math.round((parseDateKey(e) - parseDateKey(s)) / 86400000) + 1;
-}
-// 事项的开始/结束日（兼容老数据）
-function eventStart(ev) { return ev.startDate || ev.date || ''; }
-function eventEnd(ev) { return ev.endDate || ev.date || ''; }
-// 事项在某一天是否处于执行区间内
-function eventSpansDate(ev, key) {
-  const s = eventStart(ev);
-  if (!s) return false;
-  const e = eventEnd(ev) || s;
-  return s <= key && key <= e;
-}
-// 'YYYY-MM-DD' → 'M/D'
-function fmtShort(key) {
-  return `${+key.slice(5, 7)}/${+key.slice(8, 10)}`;
-}
+// ============ 日期区间工具（M0：单一数据源在 src/core/dates.js） ============
+function parseDateKey(key) { return TTCore.dates.parseDateKey(key); }
+function addDaysKey(key, n) { return TTCore.dates.addDaysKey(key, n); }
+function durationDays(startKey, endKey) { return TTCore.dates.durationDays(startKey, endKey); }
+function eventStart(ev) { return TTCore.dates.eventStart(ev); }
+function eventEnd(ev) { return TTCore.dates.eventEnd(ev); }
+function eventSpansDate(ev, key) { return TTCore.dates.eventSpansDate(ev, key); }
+function fmtShort(key) { return TTCore.dates.fmtShort(key); }
 
 // ============ 数据存取 ============
 // 事项（Task）：projectId 为空表示未归类
 // 缓存策略：首次读盘后常驻内存，saveEvents 写穿更新缓存（读多写少，消除每次 JSON.parse）
-let eventsCache = null;
+// 数据读写与业务缓存已迁至 src/core/storage.js（M0）；此处仅保留视图派生索引 dayIndex。
 let dayIndex = null;   // P6.3 按日索引：{ plain: Map<key, 非重复事项[]>, result: Map<key, 排序后当日数组（含重复投影）> }
-// 派生缓存统一失效（P6.3）：eventsCache 与 dayIndex 同生共死，直写 localStorage 后必须调本函数
+// 派生缓存统一失效（P6.3）：直写 localStorage 后必须调本函数
 function invalidateDerivedCaches() {
-  eventsCache = null;
   dayIndex = null;
+  TTCore.storage.invalidate();
 }
-// localStorage 写入失败可见化（P6.3）：10s 节流，避免连续弹
-let storageWarnedAt = 0;
-function notifyStorageFail(err) {
-  const now = Date.now();
-  if (now - storageWarnedAt < 10000) return;
-  storageWarnedAt = now;
-  showToast('本地存储写入失败：' + (err && err.message || '配额可能已满') + '，本次修改可能不会被保存', 'error');
-}
-function loadEvents() {
-  if (eventsCache) return eventsCache;
-  try {
-    const list = JSON.parse(localStorage.getItem('events') || '[]');
-    // 数据迁移兜底：补齐新字段
-    for (const ev of list) {
-      if (ev.projectId === undefined) ev.projectId = null;
-      if (ev.description === undefined) ev.description = '';
-      // 老数据只有单日期 date → 起止日期相同
-      if (ev.startDate === undefined) ev.startDate = ev.date || '';
-      if (ev.endDate === undefined) ev.endDate = ev.date || '';
-      // 纠正异常区间（结束早于开始 → 交换）
-      if (ev.startDate && ev.endDate && ev.endDate < ev.startDate) {
-        const t = ev.startDate; ev.startDate = ev.endDate; ev.endDate = t;
-      }
-      // 番茄钟累计完成数（绑定事项后，每完成一个专注 +1）
-      if (ev.pomoCount === undefined) ev.pomoCount = 0;
-      // 提醒：提前分钟数 / 贪睡截止时间戳
-      if (ev.remindAhead === undefined) ev.remindAhead = 0;
-      if (ev.snoozeUntil === undefined) ev.snoozeUntil = 0;
-      // 同步预留：最后同步时间
-      if (ev.lastSyncAt === undefined) ev.lastSyncAt = '';
-      // 重复规则（P3.2）：null = 不重复；命中日由虚拟投影动态生成
-      if (ev.recur === undefined) ev.recur = null;
-      // 标签（P3.3）：字符串数组，用于今日/事项视图筛选
-      if (!Array.isArray(ev.tags)) ev.tags = [];
-      // 阶段（P8.1）：事项所属项目阶段 id，空字符串表示未分阶段
-      if (ev.phaseId === undefined) ev.phaseId = '';
-    }
-    eventsCache = list;
-    return list;
-  } catch { eventsCache = []; return eventsCache; }
-}
-function saveEvents(list) {
-  eventsCache = Array.isArray(list) ? list : [];
-  dayIndex = null;   // 派生索引随写失效
-  try { localStorage.setItem('events', JSON.stringify(eventsCache)); }
-  catch (e) { notifyStorageFail(e); }
-}
+// 平台边界注入（M0）：宿主能力经 renderer/platform.js 门面注入核心层，
+// 使 TTCore 无需感知 DOM / Electron；此处只声明桌面端的 toast 与派生缓存失效回调。
+TTPlatform.configureStorage({ toast: showToast });
+TTPlatform.configureView({ onDerivedInvalid: function () { dayIndex = null; } });
+function notifyStorageFail(err) { return TTCore.storage.notifyStorageFail(err); }
+function loadEvents() { return TTCore.storage.loadEvents(); }
+function saveEvents(list) { TTCore.storage.saveEvents(list); }
 // ---- 重复事项（P3.2）：不物理展开副本，按日虚拟投影 ----
-const RECUR_FREQS = ['daily', 'weekdays', 'weekly', 'monthly'];
+const RECUR_FREQS = TTCore.constants.RECUR_FREQS;
 const RECUR_FREQ_LABELS = { none: '不重复', daily: '每天', weekdays: '工作日', weekly: '每周', monthly: '每月' };
 
 // 事项是否启用了有效重复规则
 function isRecurOn(ev) {
-  return !!(ev && ev.recur && RECUR_FREQS.includes(ev.recur.freq));
+  return TTCore.analytics.isRecurOn(ev);
 }
 
 // 判断重复规则是否命中目标日期（startKey/targetKey 均为 YYYY-MM-DD）
@@ -196,25 +107,10 @@ function recurMatchesDate(recur, startKey, targetKey) {
 }
 
 // 重复事项完成态（按日 override，key = 模板id|日期；勾选虚拟事项只写这里，不改模板 done）
-let recurDoneCache = null;
-function loadRecurDone() {
-  if (recurDoneCache) return recurDoneCache;
-  try { recurDoneCache = JSON.parse(localStorage.getItem('recurDone') || '{}'); }
-  catch { recurDoneCache = {}; }
-  return recurDoneCache;
-}
-function recurDoneGet(evId, key) {
-  return !!loadRecurDone()[evId + '|' + key];
-}
-function recurDoneSet(evId, key, val) {
-  const map = loadRecurDone();
-  if (val) map[evId + '|' + key] = true;
-  else delete map[evId + '|' + key];
-  recurDoneCache = map;
-  dayIndex = null;   // 投影完成态变化 → 按日索引失效（P6.3）
-  try { localStorage.setItem('recurDone', JSON.stringify(map)); }
-  catch (e) { notifyStorageFail(e); }
-}
+// M0：读写与缓存迁至 src/core/storage.js
+function loadRecurDone() { return TTCore.storage.loadRecurDone(); }
+function recurDoneGet(evId, key) { return TTCore.storage.recurDoneGet(evId, key); }
+function recurDoneSet(evId, key, val) { TTCore.storage.recurDoneSet(evId, key, val); }
 
 // 生成某日虚拟事项视图：复制模板字段 + 复合 id + 覆盖完成态（纯视图对象，不改模板数据）
 function makeVirtualEvent(ev, key) {
@@ -450,7 +346,7 @@ function calSubNameFromUrl(url) {
   try { return new URL(url).hostname || url.slice(0, 40); } catch { return url.slice(0, 40); }
 }
 function mkCalSubId() {
-  return 'cs' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  return TTCore.ids.mkCalSubId();
 }
 
 // 订阅是否到期应自动刷新（refreshIntervalMin=-1 仅手动；无 lastSync 立即到期）
@@ -754,11 +650,23 @@ function sortEvents(list) {
 
 // 置顶优先（P10.1）：pinned 项排最前（按 pinnedAt 倒序，后置顶在上），其余保持原相对顺序
 // 仅显示层排序，不改任何数据；项目卡与事项列表渲染用
+// V3：项目排序——未完成在前（置顶优先），已完成下移（置顶优先 + 完成时间倒序）
 function withPinnedFirst(list) {
-  const pin = [], rest = [];
-  for (const it of list) (it && it.pinned ? pin : rest).push(it);
-  pin.sort((a, b) => (b.pinnedAt || '').localeCompare(a.pinnedAt || ''));
-  return [...pin, ...rest];
+  const incomplete = [], complete = [];
+  for (const it of list) (it && it.isCompleted ? complete : incomplete).push(it);
+  const sortGroup = arr => {
+    const pin = [], rest = [];
+    for (const it of arr) (it && it.pinned ? pin : rest).push(it);
+    pin.sort((a, b) => (b.pinnedAt || '').localeCompare(a.pinnedAt || ''));
+    return [...pin, ...rest];
+  };
+  // 已完成组：置顶优先，同级按完成时间倒序
+  complete.sort((a, b) => {
+    const pa = a && a.pinned ? 0 : 1, pb = b && b.pinned ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    return (b.completedAt || '').localeCompare(a.completedAt || '');
+  });
+  return [...sortGroup(incomplete), ...complete];
 }
 
 // ---- 单日事项排序（仅显示层，不改任何任务数据；甘特图走 sortEvents 不受影响） ----
@@ -807,42 +715,9 @@ function sortDayEvents(list) {
   return [...list].sort(cmp[daySort.by] || cmp.start);
 }
 
-// 项目（Project）：1 → N 事项（缓存策略同 loadEvents）
-let projectsCache = null;
-function loadProjects() {
-  if (projectsCache) return projectsCache;
-  try {
-    const list = JSON.parse(localStorage.getItem('projects') || '[]');
-    // 数据迁移兜底：补齐起止时间与分类
-    for (const p of list) {
-      if (p.startDate === undefined) p.startDate = '';
-      if (p.endDate === undefined) p.endDate = '';
-      if (p.category === undefined) p.category = 'work';
-      if (p.revision === undefined) p.revision = 1;                 // 同步版本号（导出/修改递增）
-      if (p.updatedAt === undefined) p.updatedAt = p.createdAt || '';
-      // 阶段（P8.1）：项目下的阶段列表，[{id, name, order, startDate, endDate}]（P9.1 增日期）
-      if (!Array.isArray(p.phases)) p.phases = [];
-      for (const ph of p.phases) {
-        if (ph.startDate === undefined) ph.startDate = '';
-        if (ph.endDate === undefined) ph.endDate = '';
-        if (ph.startDate && ph.endDate && ph.endDate < ph.startDate) {
-          const t = ph.startDate; ph.startDate = ph.endDate; ph.endDate = t;
-        }
-      }
-      if (p.startDate && p.endDate && p.endDate < p.startDate) {
-        const t = p.startDate; p.startDate = p.endDate; p.endDate = t;
-      }
-    }
-    projectsCache = list;
-    return list;
-  }
-  catch { projectsCache = []; return projectsCache; }
-}
-function saveProjects(list) {
-  projectsCache = Array.isArray(list) ? list : [];
-  try { localStorage.setItem('projects', JSON.stringify(projectsCache)); }
-  catch (e) { notifyStorageFail(e); }
-}
+// 项目（Project）：1 → N 事项（读写与缓存迁至 src/core/storage.js，M0）
+function loadProjects() { return TTCore.storage.loadProjects(); }
+function saveProjects(list) { TTCore.storage.saveProjects(list); }
 function getProject(id) {
   return loadProjects().find(p => p.id === id) || null;
 }
@@ -948,45 +823,22 @@ function render() {
 }
 
 // ============ 事项标签（P3.3）：逗号分隔输入，仅本机筛选用 ============
-const TAG_MAX = 6;        // 单个事项最多标签数
-const TAG_LEN_MAX = 12;   // 单个标签最长字符
-// "工作, 重要，加班" → ['工作','重要','加班']（中英文逗号均支持，去空去重截断）
-function parseTags(str) {
-  const seen = new Set();
-  const out = [];
-  for (let t of String(str || '').split(/[,，]/)) {
-    t = t.trim().slice(0, TAG_LEN_MAX);
-    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
-    if (out.length >= TAG_MAX) break;
-  }
-  return out;
-}
-// 汇总所有事项出现过的标签（去重，中文排序）→ 供筛选 chips
-function collectTags() {
-  const seen = new Set();
-  for (const ev of loadEvents()) {
-    for (const t of (ev.tags || [])) seen.add(t);
-  }
-  return Array.from(seen).sort((a, b) => a.localeCompare(b, 'zh'));
-}
-// 按标签筛选事项列表（tag 为空原样返回）
-function filterByTag(list, tag) {
-  if (!tag) return list;
-  return list.filter(ev => Array.isArray(ev.tags) && ev.tags.includes(tag));
-}
+// M0：解析/汇总/筛选迁至 src/core/tags.js（单一数据源）
+const TAG_MAX = TTCore.tags.TAG_MAX;        // 单个事项最多标签数
+const TAG_LEN_MAX = TTCore.tags.TAG_LEN_MAX; // 单个标签最长字符
+function parseTags(str) { return TTCore.tags.parseTags(str); }
+function collectTags() { return TTCore.tags.collectTags(); }
+function filterByTag(list, tag) { return TTCore.tags.filterByTag(list, tag); }
 
 // ============ 事项检查清单（P6.2）：子任务 ============
 // ev.checklist 为可选字段：[{ id, text, done }]，缺省 = 无子任务（旧数据零迁移）；
 // 子任务不级联完成主事项、不进统计、不支持嵌套；随事项 updatedAt 走 LWW 同步（不动 normTaskSnap 白名单）
-// 进度：无子任务返回 null；否则 { done, total }（事项行角标与表单共用口径）
-function checklistProgress(ev) {
-  const ck = ev && ev.checklist;
-  if (!Array.isArray(ck) || !ck.length) return null;
-  return { done: ck.filter(c => c && c.done).length, total: ck.length };
-}
+// 进度/归一化（M0：迁至 src/core/checklist.js，单一数据源）
+function checklistProgress(ev) { return TTCore.checklist.checklistProgress(ev); }
+function normalizeChecklist(items) { return TTCore.checklist.normalizeChecklist(items); }
 // 子任务 id：时间戳 + 随机（与事项 id 同风格）
 function mkCkId() {
-  return 'ck' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  return TTCore.ids.mkCkId();
 }
 
 // ============ 公共构建器 ============
@@ -1023,21 +875,39 @@ function buildEventItem(ev, opts = {}) {
     if (s) d = (e && e !== s) ? `${fmtShort(s)}~${fmtShort(e)}` : fmtShort(s);
     badges += `<span class="event-date-badge">${d}</span>`;
   }
+  // V3：项目/阶段/优先级标签（showProject 时统一显示；不截断、水平滚动；用最新关联数据）
   if (opts.showProject) {
     const p = ev.projectId ? getProject(ev.projectId) : null;
-    if (p) badges += `<span class="event-project-badge">${escapeHtml(p.name)}</span>`;
-    else badges += `<span class="event-project-badge project-none">未归类</span>`;
+    // 项目标签：有项目显示最新项目名；无项目显示"独立事项"
+    if (p) badges += `<span class="event-project-badge" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>`;
+    else badges += `<span class="event-project-badge project-none">独立事项</span>`;
+    // 阶段标签：有项目有 phaseId 且能查到阶段显示阶段名；否则显示"未分配阶段"
+    let phName = '';
+    if (p && ev.phaseId && Array.isArray(p.phases)) {
+      const ph = p.phases.find(x => x.id === ev.phaseId);
+      if (ph) phName = ph.name;
+    }
+    if (phName) badges += `<span class="event-phase-badge" title="阶段：${escapeHtml(phName)}">${escapeHtml(phName)}</span>`;
+    else badges += `<span class="event-phase-badge phase-none">未分配阶段</span>`;
+    // 优先级标签：用事项 urgency 枚举（紧急/一般/松散），与项目 PRIORITIES 区分不冲突
+    const u = URGENCIES[ev.urgency] || URGENCIES.normal;
+    badges += `<span class="event-pri-badge" title="优先级：${u.label}" style="color:${u.color}">${u.label}</span>`;
   }
-  // 阶段标签（P8.1）：有 phaseId 且能找到阶段时显示
-  if (ev.phaseId && ev.projectId) {
-    const p = getProject(ev.projectId);
-    const ph = p && Array.isArray(p.phases) ? p.phases.find(x => x.id === ev.phaseId) : null;
-    if (ph) badges += `<span class="event-phase-badge" title="阶段：${escapeHtml(ph.name)}">${escapeHtml(ph.name)}</span>`;
-  }
-  // 子任务进度角标（P6.2）：全部完成时绿色；点击打开编辑器定位子任务区
+  // 子任务进度角标（P6.2）→ V3.2：改为静态徽标（不再折叠，子任务默认直接显示）
   const ckProg = checklistProgress(ev);
   if (ckProg) {
-    badges += `<span class="event-ck-badge${ckProg.done === ckProg.total ? ' all' : ''}" data-ck-id="${ev.id}" title="子任务 ${ckProg.done}/${ckProg.total}">▸${ckProg.done}/${ckProg.total}</span>`;
+    badges += `<span class="event-checklist-badge" title="子任务 ${ckProg.done}/${ckProg.total}">✓${ckProg.done}/${ckProg.total}</span>`;
+  }
+
+  // V3.2：子任务列表容器（仅有 checklist 时追加；默认直接显示，不折叠）
+  let subtasksHtml = '';
+  if (ckProg) {
+    const rows = (Array.isArray(ev.checklist) ? ev.checklist : []).map(c => `
+      <div class="subtask-row${c.done ? ' done' : ''}" data-ck-id="${c.id}" data-ev-id="${ev.id}">
+        <span class="subtask-check${c.done ? ' done' : ''}" title="${c.done ? '取消完成' : '标记完成'}">✓</span>
+        <span class="subtask-title${c.done ? ' done' : ''}">${escapeHtml(c.text || '')}</span>
+      </div>`).join('');
+    subtasksHtml = `<div class="event-subtasks" data-sub-id="${ev.id}">${rows}</div>`;
   }
 
   item.innerHTML = `
@@ -1047,8 +917,30 @@ function buildEventItem(ev, opts = {}) {
     <span class="event-title">${(ev.pinned ? '<span class="pin-mark" title="已置顶">📌</span>' : '') + escapeHtml(ev.title)}</span>
     ${ev._templateId ? '' : `<span class="event-del" data-id="${ev.id}" title="删除">×</span>`}
     ${badges ? `<span class="event-badges">${badges}</span>` : ''}
+    ${subtasksHtml}
   `;
   return item;
+}
+
+// V3：切换事项子任务展开/收起状态（仅视图层，不动数据）
+function toggleSubtaskExpand(evId) {
+  if (expandedSubtasks.has(evId)) expandedSubtasks.delete(evId);
+  else expandedSubtasks.add(evId);
+  render();
+}
+
+// V3：切换子任务完成状态（持久化 checklist，bump 项目 revision 同步；不级联主事项完成）
+function toggleSubtask(evId, ckId) {
+  const all = loadEvents();
+  const ev = all.find(e => e.id === evId);
+  if (!ev || !Array.isArray(ev.checklist)) return;
+  const ck = ev.checklist.find(c => c.id === ckId);
+  if (!ck) return;
+  ck.done = !ck.done;
+  ev.updatedAt = new Date().toISOString();
+  saveEvents(all);
+  if (ev.projectId) bumpProjectRevision(ev.projectId);
+  render();
 }
 
 // ============ 语音输入共享绑定（长按说话，Windows SAPI 离线识别） ============
@@ -1324,9 +1216,7 @@ function bindDateRangeSync(form) {
 function bindFormEvents(form) {
   // ---- 子任务（P6.2）：表单闭包内维护 ckItems，保存时随 fields 写回 ----
   const evForCk = form.dataset.editId ? loadEvents().find(x => x.id === form.dataset.editId) : null;
-  let ckItems = evForCk && Array.isArray(evForCk.checklist)
-    ? evForCk.checklist.map(c => ({ id: c.id || mkCkId(), text: String(c.text || ''), done: !!c.done }))
-    : [];
+  let ckItems = normalizeChecklist(evForCk && evForCk.checklist);
   const ckListEl = form.querySelector('.ck-list');
   const ckInputEl = form.querySelector('.ck-input');
   const paintCk = () => {
@@ -1584,15 +1474,13 @@ function bindViewEvents() {
     });
   });
 
-  // 子任务进度角标（P6.2）→ 打开编辑器并聚焦子任务输入框
-  weekList.querySelectorAll('.event-ck-badge').forEach(badge => {
-    badge.addEventListener('click', (e) => {
+  // V3.2：子任务默认直接显示（不再需要展开/收起控件）
+  // V3：子任务勾选完成（持久化 checklist；不级联主事项完成）
+  weekList.querySelectorAll('.subtask-check').forEach(chk => {
+    chk.addEventListener('click', (e) => {
       e.stopPropagation();
-      const real = loadEvents().find(x => x.id === badge.dataset.ckId);
-      if (!real) return;
-      openTaskEditor(real);
-      const ckInput = weekList.querySelector('.editor-block .ck-input');
-      if (ckInput) ckInput.focus();
+      const row = chk.closest('.subtask-row');
+      if (row) toggleSubtask(row.dataset.evId, row.dataset.ckId);
     });
   });
 
@@ -1606,6 +1494,13 @@ function bindViewEvents() {
         const fresh = weekList.querySelector(`.project-card[data-id="${id}"]`);
         if (fresh) fresh.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
+    });
+  });
+  // V3：项目完成勾选框（独立点击，不触发展开）
+  weekList.querySelectorAll('.pj-complete').forEach(chk => {
+    chk.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleProjectComplete(chk.dataset.pid);
     });
   });
 
@@ -1625,12 +1520,19 @@ function bindViewEvents() {
     });
   });
 
-  // 项目信息卡 ✎ 编辑按钮（项目详情页）
+  // 项目 ✎ 编辑按钮（V3.2：按钮在子切换行，form 在隐藏 .project-info 容器内）
   weekList.querySelectorAll('.info-edit-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const info = btn.closest('.project-info');
-      if (info) openProjectForm(info.dataset.id, info.querySelector('.project-form'));
+      const pid = btn.dataset.pid;
+      if (!pid) {
+        const info = btn.closest('.project-info');
+        if (info) openProjectForm(info.dataset.id, info.querySelector('.project-form'));
+        return;
+      }
+      const box = weekList.querySelector(`.project-inline[data-pid="${pid}"]`);
+      const form = box ? box.querySelector('.project-form') : null;
+      if (form) openProjectForm(pid, form);
     });
   });
 
@@ -2133,7 +2035,7 @@ function enableWeekDrag() {
   weekList.querySelectorAll('.event-item').forEach(item => {
     item.addEventListener('mousedown', (e) => {
       if (e.button !== 0 || currentTool || editing) return;
-      if (e.target.closest('.event-check,.event-del,.ev-voice-btn')) return;   // 控件不触发拖拽
+      if (e.target.closest('.event-check,.event-del,.ev-voice-btn,.event-expand,.subtask-check')) return;   // 控件不触发拖拽
       dragId = item.dataset.id || '';
       if (!dragId) return;
       sx = e.clientX; sy = e.clientY; started = false;
@@ -2290,19 +2192,21 @@ function renderProjects() {
   weekList.appendChild(block);
 
   const projects = withPinnedFirst(loadProjects());
-  if (projects.length === 0) {
+  // V3：普通列表只显示未归档项目（完成超过 3 天的移入归档区；不删数据）
+  const visibleProjects = projects.filter(p => !listArchiveHidden(p));
+  if (visibleProjects.length === 0 && projects.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
     hint.textContent = '— 暂无项目 —';
     weekList.appendChild(hint);
   }
-  for (const p of projects) {
+  for (const p of visibleProjects) {
     const { done, total } = projectProgress(p.id);
     const cat = projectCategory(p);
     const pri = projectPriority(p);
     const expanded = expandedProjectId === p.id;
     const card = document.createElement('div');
-    card.className = 'project-card' + (expanded ? ' expanded' : '');
+    card.className = 'project-card' + (expanded ? ' expanded' : '') + (p.isCompleted ? ' completed' : '');
     card.style.borderLeft = `3px solid ${cat.color}`;
     card.dataset.id = p.id;
     card.title = expanded ? '点击收起' : '点击展开事项';
@@ -2310,6 +2214,7 @@ function renderProjects() {
       <div class="pj-head">
         <span class="pj-arrow">▸</span>
         <div class="project-name">${(p.pinned ? '<span class="pin-mark" title="已置顶">📌</span>' : '') + escapeHtml(p.name)}</div>
+        <span class="pj-complete${p.isCompleted ? ' checked' : ''}" data-pid="${p.id}" title="${p.isCompleted ? '取消完成' : '标记完成'}">${p.isCompleted ? '✓' : '○'}</span>
       </div>
       ${p.description ? `<div class="project-desc">${escapeHtml(p.description)}</div>` : ''}
       ${progressBarHtml(done, total)}
@@ -2323,6 +2228,28 @@ function renderProjects() {
     weekList.appendChild(card);
     // 同层展开的项目事项面板（再次点击卡片收起）
     if (expanded) weekList.appendChild(buildProjectInline(p));
+  }
+
+  // V3：已完成项目归档区（完成 >3 天；按完成时间倒序；不删数据，可展开查看详情）
+  const archivedProjects = sortByCompletedDesc(projects.filter(p => listArchiveHidden(p)));
+  if (archivedProjects.length) {
+    const archiveSec = buildArchiveSection('projects', archivedProjects, (p) => {
+      const row = document.createElement('div');
+      row.className = 'project-card completed archived';
+      row.style.borderLeft = `3px solid ${projectCategory(p).color}`;
+      row.dataset.id = p.id;
+      row.title = '点击展开查看归档项目';
+      row.innerHTML = `
+        <div class="pj-head">
+          <span class="pj-arrow">▸</span>
+          <div class="project-name">${escapeHtml(p.name)}</div>
+          <span class="archive-meta">${p.completedAt ? `完成于 ${fmtShort(p.completedAt.slice(0, 10))}` : '已完成'}</span>
+        </div>
+        <div class="project-meta"><span>${projectRangeText(p)}</span></div>
+      `;
+      return row;
+    });
+    weekList.appendChild(archiveSec);
   }
 
   // 同步操作日志（导出/导入/合并记录）
@@ -2340,41 +2267,24 @@ function buildProjectInline(p) {
   box.className = 'project-inline';
   box.dataset.pid = p.id;
 
-  // 项目信息卡（✎ 按钮或右键可编辑基本信息）
-  const cat = projectCategory(p);
-  const pri = projectPriority(p);
-  const info = document.createElement('div');
-  info.className = 'project-info';
-  info.dataset.id = p.id;
-  info.style.borderLeft = `3px solid ${cat.color}`;
-  info.innerHTML = `
-    <div class="project-name-row">
-      <div class="project-name">${escapeHtml(p.name)}</div>
-      <button class="info-edit-btn" title="编辑项目信息">✎</button>
-    </div>
-    ${p.description ? `<div class="project-desc">${escapeHtml(p.description)}</div>` : '<div class="project-desc muted">暂无简介</div>'}
-    ${progressBarHtml(done, total)}
-    <div class="project-meta">
-      <span class="pj-meta-cat" style="color:${cat.color}">● ${cat.label}</span>
-      <span class="pj-meta-pri" style="color:${pri.color}">◆ ${pri.label}</span>
-      <span>${projectRangeText(p)}</span>
-      <span>项目进度 ${pct}% · ${total} 个事项 · ${done} 已完成</span>
-    </div>
-  `;
-  info.appendChild(buildProjectForm());
-  box.appendChild(info);
-
   // 阶段管理区块（P8.1）
   box.appendChild(buildPhaseBlock(p));
 
-  // 列表 / 甘特图 子切换（每个项目各自记忆模式）
+  // 列表 / 甘特图 子切换（每个项目各自记忆模式）+ 项目编辑入口（V3.2：取消重复信息卡，✎ 移到子切换行）
   const subTabs = document.createElement('div');
   subTabs.className = 'sub-tabs';
   subTabs.innerHTML = `
     <button data-mode="list" data-pid="${p.id}" class="${mode === 'list' ? 'active' : ''}">列表</button>
     <button data-mode="gantt" data-pid="${p.id}" class="${mode === 'gantt' ? 'active' : ''}">甘特图</button>
+    <button class="info-edit-btn" data-pid="${p.id}" title="编辑项目信息">✎ 项目</button>
   `;
   box.appendChild(subTabs);
+  // 编辑表单（隐藏容器，由 ✎ / 右键触发）
+  const formHolder = document.createElement('div');
+  formHolder.className = 'project-info hidden';
+  formHolder.dataset.id = p.id;
+  formHolder.appendChild(buildProjectForm());
+  box.appendChild(formHolder);
 
   // 新建事项（自动归属当前项目）
   const addBlock = document.createElement('div');
@@ -2389,17 +2299,39 @@ function buildProjectInline(p) {
   if (mode === 'gantt') {
     box.appendChild(buildGantt(p));
   } else {
-    // 事项列表
+    // V3.2：事项按阶段分组渲染——每个阶段下显示其归属事项；未分配阶段的事项放在最后
     const tasks = getProjectTasks(p.id);
+    const phases = Array.isArray(p.phases) ? p.phases : [];
     const list = document.createElement('div');
-    list.className = 'event-list';
+    list.className = 'event-list phase-grouped';
     if (tasks.length === 0) {
       const hint = document.createElement('div');
       hint.className = 'empty-hint';
       hint.textContent = '— 暂无事项 —';
       list.appendChild(hint);
     } else {
-      for (const t of tasks) list.appendChild(buildEventItem(t, { showDate: true }));
+      const appendGroup = (label, count, dotColor, tasks, phid) => {
+        if (tasks.length === 0) return;
+        const group = document.createElement('div');
+        group.className = 'phase-group' + (phid ? '' : ' no-phase');
+        if (phid) group.dataset.phid = phid;
+        group.innerHTML = `<div class="phase-group-head">
+          ${dotColor ? `<span class="phase-group-dot" style="background:${dotColor}"></span>` : ''}
+          <span class="phase-group-name${phid ? '' : ' muted'}">${escapeHtml(label)}</span>
+          <span class="phase-group-count">${count}</span>
+        </div>`;
+        const taskList = document.createElement('div');
+        taskList.className = 'phase-group-tasks';
+        for (const t of tasks) taskList.appendChild(buildEventItem(t, { showDate: true }));
+        group.appendChild(taskList);
+        list.appendChild(group);
+      };
+      phases.forEach((ph, i) => {
+        const phaseTasks = tasks.filter(t => t.phaseId === ph.id);
+        appendGroup(ph.name, phaseTasks.length, phaseColor(i), phaseTasks, ph.id);
+      });
+      const noPhase = tasks.filter(t => !t.phaseId);
+      appendGroup('未分配阶段', noPhase.length, '', noPhase, '');
     }
     box.appendChild(list);
   }
@@ -2423,8 +2355,9 @@ function buildPhaseBlock(p) {
         const pt = tasks.filter(t => t.phaseId === ph.id);
         const prog = phaseProgress(pt);
         const dur = (ph.startDate && ph.endDate) ? `${durationDays(ph.startDate, ph.endDate)} 天` : '';
-        return `<div class="phase-item" data-phid="${ph.id}">
+        return `<div class="phase-item${ph.isCompleted ? ' completed' : ''}" data-phid="${ph.id}">
           <div class="phase-item-main">
+            <span class="ph-complete${ph.isCompleted ? ' checked' : ''}" data-phid="${ph.id}" title="${ph.isCompleted ? '取消完成' : '标记完成'}">${ph.isCompleted ? '✓' : ''}</span>
             <span class="phase-dot" style="background:${phaseColor(i)}"></span>
             <span class="phase-name" contenteditable="false" title="点击重命名">${escapeHtml(ph.name)}</span>
             <span class="phase-count">${prog.done}/${prog.total} · ${prog.pct}%</span>
@@ -2440,16 +2373,59 @@ function buildPhaseBlock(p) {
             <input type="date" class="phase-date-end" value="${ph.endDate || ''}" title="阶段结束日期">
             <span class="phase-dur">${dur}</span>
           </div>
+          ${ph.description ? `<div class="phase-desc">${escapeHtml(ph.description)}</div>` : ''}
         </div>`;
       }).join('')}
     </div>
+    <div class="phase-add-form hidden" data-pid="${p.id}">
+      <input type="text" class="phase-new-name" placeholder="阶段名称（必填）" maxlength="60">
+      <textarea class="phase-new-desc" placeholder="阶段简介（选填）" rows="2" maxlength="200"></textarea>
+      <div class="phase-new-dates">
+        <input type="date" class="phase-new-start" title="开始日期（必填）">
+        <span>~</span>
+        <input type="date" class="phase-new-end" title="结束日期（必填，不早于开始）">
+      </div>
+      <div class="phase-new-ops">
+        <button class="phase-new-save">保存</button>
+        <button class="phase-new-cancel">取消</button>
+      </div>
+    </div>
   `;
 
-  // 添加阶段
-  block.querySelector('.phase-add-btn').addEventListener('click', () => {
-    const name = prompt('输入阶段名称：', '新阶段');
-    if (name === null) return;
-    addPhase(p.id, name);
+  // V3：添加阶段——切换内联表单（替代 prompt，确保可操作且字段完整）
+  // V3-fix：表单打开期间通知主进程 editing=true，避免鼠标移出窗口触发 sidebar 自动折叠导致保存按钮变 0x0 不可点击
+  block.querySelector('.phase-add-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const form = block.querySelector('.phase-add-form');
+    if (form.classList.contains('hidden')) {
+      form.classList.remove('hidden');
+      const todayKey = dateKey(new Date());
+      const s = form.querySelector('.phase-new-start'); if (!s.value) s.value = todayKey;
+      const en = form.querySelector('.phase-new-end'); if (!en.value) en.value = todayKey;
+      if (window.timetable) window.timetable.setEditing(true);
+      form.querySelector('.phase-new-name').focus();
+    } else {
+      form.classList.add('hidden');
+      if (window.timetable) window.timetable.setEditing(false);
+    }
+  });
+  block.querySelector('.phase-new-cancel').addEventListener('click', (e) => {
+    e.stopPropagation();
+    block.querySelector('.phase-add-form').classList.add('hidden');
+    if (window.timetable) window.timetable.setEditing(false);
+  });
+  block.querySelector('.phase-new-save').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const form = block.querySelector('.phase-add-form');
+    const name = form.querySelector('.phase-new-name').value.trim();
+    const desc = form.querySelector('.phase-new-desc').value.trim();
+    const startDate = form.querySelector('.phase-new-start').value;
+    const endDate = form.querySelector('.phase-new-end').value;
+    if (!name) { showToast('请填写阶段名称', 'error'); form.querySelector('.phase-new-name').focus(); return; }
+    if (!startDate || !endDate) { showToast('请填写阶段起止日期', 'error'); return; }
+    if (endDate < startDate) { showToast('结束日期不能早于开始日期', 'error'); return; }
+    if (window.timetable) window.timetable.setEditing(false);
+    addPhase(p.id, { name, description: desc, startDate, endDate });
     render();
   });
 
@@ -2477,6 +2453,11 @@ function buildPhaseBlock(p) {
     nameEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
       if (e.key === 'Escape') { nameEl.blur(); }
+    });
+    // V3：阶段完成勾选框
+    item.querySelector('.ph-complete').addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePhaseComplete(p.id, phid);
     });
     item.querySelector('.phase-up').addEventListener('click', () => { movePhase(p.id, phid, -1); render(); });
     item.querySelector('.phase-down').addEventListener('click', () => { movePhase(p.id, phid, 1); render(); });
@@ -2507,7 +2488,7 @@ function phaseColor(i) {
 }
 
 // ============ 甘特图（项目内联 & 日历总览共用） ============
-const GANTT_STATE = { dayW: 28 };   // 甘特图单日列宽 px（可变：缩放 16~56）
+const GANTT_STATE = { dayW: 28, userScrolled: false, savedScrollLeft: null };   // 甘特图单日列宽 px（可变：缩放 16~56）；userScrolled/savedScrollLeft：用户主动滚动后保留位置，不再强制跳回今天
 const GANTT_DAY_W_MIN = 16, GANTT_DAY_W_MAX = 56, GANTT_DAY_W_STEP = 4;
 // 缩放边界收敛（工具栏按钮与 Ctrl+滚轮共用；独立成纯函数便于单元测试）
 function ganttClampDayW(w) {
@@ -2516,6 +2497,75 @@ function ganttClampDayW(w) {
 const GANTT_ROW_H = 30;    // 甘特图事项行高 px
 const GANTT_GROUP_H = 24;  // 甘特图项目分组行高 px（总览）
 const GANTT_PHASE_H = 26;  // 甘特图阶段父级行高 px（P9.1）
+// V3：甘特图默认视图的"已完成归档"门槛——完成超过此天数从默认视图隐藏（不影响数据）
+const GANTT_ARCHIVE_DAYS = 7;
+// V3：判断记录是否因"完成超过 N 天"而从甘特图默认视图隐藏
+// 项目用 isCompleted、事项用 done；完成时间用 completedAt（回退 updatedAt）；不破坏数据
+function ganttArchiveHidden(rec) {
+  if (!rec) return false;
+  const isDone = !!(rec.isCompleted || rec.done);
+  if (!isDone) return false;
+  const ca = rec.completedAt || rec.updatedAt;
+  if (!ca) return false;
+  const t = new Date(ca).getTime();
+  if (!Number.isFinite(t)) return false;
+  return (Date.now() - t) > GANTT_ARCHIVE_DAYS * 86400000;
+}
+// V3：普通列表/项目面板的"已完成归档"门槛——完成超过此天数从普通列表移入归档区（不影响数据）
+const LIST_ARCHIVE_DAYS = 3;
+// V3：判断记录是否因"完成超过 N 天"而从普通列表移入归档区
+// 与 ganttArchiveHidden 同口径，仅天数不同（3 天 vs 7 天）；不破坏数据，仅视图分离
+function listArchiveHidden(rec) {
+  if (!rec) return false;
+  const isDone = !!(rec.isCompleted || rec.done);
+  if (!isDone) return false;
+  const ca = rec.completedAt || rec.updatedAt;
+  if (!ca) return false;
+  const t = new Date(ca).getTime();
+  if (!Number.isFinite(t)) return false;
+  return (Date.now() - t) > LIST_ARCHIVE_DAYS * 86400000;
+}
+// V3：归档记录按完成时间倒序（最近完成在前；无 completedAt 的排末尾）
+function sortByCompletedDesc(list) {
+  return (list || []).slice().sort((a, b) => {
+    const ta = a && a.completedAt ? new Date(a.completedAt).getTime() : 0;
+    const tb = b && b.completedAt ? new Date(b.completedAt).getTime() : 0;
+    return tb - ta;
+  });
+}
+// V3：构建"已完成归档"折叠区（项目/阶段/事项通用；点击标题展开/收起；展开后显示记录列表）
+//   kind: 'events' | 'projects' | 'phases'  → 决定标题文案与子项渲染
+//   archived: 已归档记录数组（已按倒序排好）
+//   renderItem(rec) → HTMLElement：调用方提供子项渲染（复用 buildEventItem / buildProjectCard 等）
+const expandedArchiveSections = new Set();   // 会话内归档区展开状态（key = kind），跨重渲染保留
+function buildArchiveSection(kind, archived, renderItem) {
+  const section = document.createElement('div');
+  section.className = 'archive-section';
+  if (!archived || archived.length === 0) return section;   // 无归档记录不渲染空壳
+  const titles = { events: '已完成事项归档', projects: '已完成项目归档', phases: '已完成阶段归档' };
+  const title = titles[kind] || '已完成归档';
+  const key = kind;
+  const isOpen = expandedArchiveSections.has(key);
+  const head = document.createElement('div');
+  head.className = 'archive-head' + (isOpen ? ' open' : '');
+  head.innerHTML = `<span class="archive-toggle">${isOpen ? '▾' : '▸'}</span> ${title} <span class="archive-count">${archived.length}</span>`;
+  head.addEventListener('click', () => {
+    if (expandedArchiveSections.has(key)) expandedArchiveSections.delete(key);
+    else expandedArchiveSections.add(key);
+    render();
+  });
+  section.appendChild(head);
+  if (isOpen) {
+    const list = document.createElement('div');
+    list.className = 'archive-list';
+    for (const rec of archived) {
+      const item = renderItem(rec);
+      if (item) list.appendChild(item);
+    }
+    section.appendChild(list);
+  }
+  return section;
+}
 const GANTT_HEAD_H = 30;   // 甘特图表头高 px
 // P9.1 阶段折叠状态（仅会话内，不持久化、不影响 Task 数据）：key = projectId + ':' + phaseId
 const ganttPhaseCollapsed = new Set();
@@ -2740,17 +2790,27 @@ function buildOverviewGantt() {
   const projects = loadProjects();
   const all = loadEvents();
 
+  // V3：甘特图默认视图——已完成超过 7 天的记录从默认视图隐藏（仅过滤显示，不删数据）
+  // - 事项层：done=true 且 completedAt > 7 天 → 不进甘特图
+  // - 项目层：isCompleted=true 且 >7 天，但项目下仍有未完成事项 → 项目组保留（未完成事项必须显示）
+  // - 阶段层：阶段完成 >7 天且其下事项都被过滤 → 阶段父行隐藏（保持层级一致）
+  const visibleAll = all.filter(t => !ganttArchiveHidden(t));
+  const visibleProjects = projects.filter(p => {
+    if (!ganttArchiveHidden(p)) return true;       // 项目未完成或完成 <= 7 天
+    return visibleAll.some(t => t.projectId === p.id);  // 完成超 7 天但仍有未完成事项 → 保留
+  });
+
   // 分组：每个项目一组；"未归类"为虚拟组，仅当存在有日期的未归类事项时成组
   // （纯无日期事项只进下方"无日期事项"区，不产生空分组）
-  const groups = projects.map(p => ({ p, tasks: sortEvents(all.filter(e => e.projectId === p.id)) }));
-  const loose = sortEvents(all.filter(e => !e.projectId));
+  const groups = visibleProjects.map(p => ({ p, tasks: sortEvents(visibleAll.filter(e => e.projectId === p.id)) }));
+  const loose = sortEvents(visibleAll.filter(e => !e.projectId));
   if (loose.some(t => eventStart(t))) groups.push({ p: null, tasks: loose });
 
   const wrap = document.createElement('div');
   wrap.className = 'gantt-wrap overview';
 
-  // 无日期事项区（跨所有分组全局收集，含未归类）
-  const undatedAll = sortEvents(all.filter(t => !eventStart(t)));
+  // 无日期事项区（跨所有分组全局收集，含未归类；V3：同样过滤完成 >7 天）
+  const undatedAll = sortEvents(visibleAll.filter(t => !eventStart(t)));
   const appendUndated = () => {
     if (!undatedAll.length) return;
     const sub = document.createElement('div');
@@ -2839,6 +2899,8 @@ function buildOverviewGantt() {
       for (const sg of subGroups) {
         const isLoose = !sg.phase;
         if (isLoose && sg.tasks.length === 0) continue;
+        // V3：阶段完成 >7 天且其下事项都被过滤 → 阶段父行也隐藏（层级一致）
+        if (!isLoose && sg.phase && ganttArchiveHidden(sg.phase) && sg.tasks.length === 0) continue;
         const color = isLoose ? 'rgba(255,255,255,0.55)' : phaseColor(phases.findIndex(ph => ph.id === sg.phase.id));
         sg.allTasks = isLoose ? g.tasks.filter(t => !t.phaseId || !phases.some(ph => ph.id === t.phaseId))
                               : g.tasks.filter(t => t.phaseId === sg.phase.id);
@@ -2998,6 +3060,9 @@ function setupGanttControls(wrap) {
     const tk = dateKey(today());
     const off = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
     right.scrollLeft = off * GANTT_STATE.dayW - right.clientWidth / 2;
+    // V3：用户主动回到今天 → 视为未滚动，下次渲染仍自动定位今天（用户意图明确）
+    GANTT_STATE.userScrolled = false;
+    GANTT_STATE.savedScrollLeft = null;
   });
 
   // 滚轮：横向滚动；Ctrl+滚轮缩放
@@ -3014,9 +3079,24 @@ function setupGanttControls(wrap) {
         }
       } else {
         right.scrollLeft += e.deltaY || e.deltaX || 0;
+        // V3：用户主动滚动 → 标记并保存位置，下次重渲染不再强制跳回今天
+        GANTT_STATE.userScrolled = true;
+        GANTT_STATE.savedScrollLeft = right.scrollLeft;
       }
     }, { passive: false });
   }
+
+  // V3：渲染后定位——首次或点过"今天"时定位到今天；用户滚动过则恢复其位置
+  requestAnimationFrame(() => {
+    if (!right) return;
+    if (GANTT_STATE.userScrolled && typeof GANTT_STATE.savedScrollLeft === 'number') {
+      right.scrollLeft = GANTT_STATE.savedScrollLeft;
+    } else if (minK) {
+      const tk = dateKey(today());
+      const off = Math.round((parseDateKey(tk) - parseDateKey(minK)) / 86400000);
+      right.scrollLeft = off * GANTT_STATE.dayW - right.clientWidth / 2;
+    }
+  });
 }
 
 // 事项编辑器：在当前视图顶部插入编辑表单块
@@ -3194,13 +3274,15 @@ function renderTasks() {
 
   const list = document.createElement('div');
   list.className = 'event-list';
-  if (shown.length === 0) {
+  // V3：普通列表只显示未归档记录（完成超过 3 天的移入归档区；不删数据）
+  const visibleShown = shown.filter(t => !listArchiveHidden(t));
+  if (visibleShown.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
     hint.textContent = tagFilter ? `— 无「${tagFilter}」标签事项 —` : '— 暂无事项 —';
     list.appendChild(hint);
   } else {
-    for (const ev of shown) {
+    for (const ev of visibleShown) {
       const item = buildEventItem(ev, { showDate: true, showProject: true });
       if (batchMode) {
         // 多选模式：整行点击切换选中；去掉单点控件避免与 bindViewEvents 的绑定冲突
@@ -3217,154 +3299,104 @@ function renderTasks() {
   }
   weekList.appendChild(list);
 
+  // V3：已完成事项归档区（完成 >3 天；按完成时间倒序；不删数据，可展开查看详情）
+  if (!batchMode) {
+    const archivedRaw = all.filter(t => listArchiveHidden(t));
+    const archived = sortByCompletedDesc(tagFilter ? filterByTag(archivedRaw, tagFilter) : archivedRaw);
+    if (archived.length) {
+      const archiveSec = buildArchiveSection('events', archived, (ev) => {
+        const item = buildEventItem(ev, { showDate: true, showProject: true });
+        // 归档项追加完成时间标记（便于查看历史；不影响数据）
+        const meta = document.createElement('span');
+        meta.className = 'archive-meta';
+        meta.textContent = ev.completedAt ? `完成于 ${fmtShort(ev.completedAt.slice(0, 10))}` : '已完成';
+        item.querySelector('.event-badges')?.appendChild(meta);
+        return item;
+      });
+      weekList.appendChild(archiveSec);
+    }
+  }
+
   bindViewEvents();
 }
 
 // ============ 数据操作 ============
 function addEvent(fields, skipRender) {
-  const all = loadEvents();
-  all.push({
-    id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
-    date: fields.startDate || '',     // 与 startDate 同步，兼容旧逻辑
-    startDate: fields.startDate || '',
-    endDate: fields.endDate || fields.startDate || '',
-    time: fields.time || '',
-    title: fields.title,
-    done: false,
-    category: fields.category || 'work',
-    urgency: fields.urgency || 'normal',
-    projectId: fields.projectId || null,
-    description: fields.description || '',
-    recur: fields.recur || null,    // 重复规则（P3.2）：null = 不重复
-    tags: Array.isArray(fields.tags) ? fields.tags : [],  // 标签（P3.3）
-    ...(Array.isArray(fields.checklist) && fields.checklist.length ? { checklist: fields.checklist } : {}),  // 子任务（P6.2）：空则不占字段
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  });
-  saveEvents(all);
+  TTCore.opsTasks.createEvent(fields);
   bumpProjectRevision(fields.projectId);   // 项目内容变化 → 版本号递增
   if (!skipRender) render();               // 批量场景由调用方最后统一 render
 }
 
 // 编辑事项（日期区间/分类/紧急程度/项目等）
 function updateEvent(id, fields) {
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
-  if (ev) {
-    const oldPid = ev.projectId;
-    if (fields.startDate !== undefined) {
-      ev.startDate = fields.startDate;
-      ev.endDate = fields.endDate || fields.startDate;
-      ev.date = fields.startDate;
-    }
-    for (const k of ['time', 'title', 'category', 'urgency', 'projectId', 'recur', 'tags', 'checklist']) {
-      if (fields[k] !== undefined) ev[k] = fields[k];
-    }
-    ev.updatedAt = new Date().toISOString();
-    saveEvents(all);
-    if (oldPid) bumpProjectRevision(oldPid);
-    if (fields.projectId && fields.projectId !== oldPid) bumpProjectRevision(fields.projectId);
-    render();
-  }
+  const r = TTCore.opsTasks.updateEvent(id, fields);
+  if (!r.ok) return;
+  if (r.oldPid) bumpProjectRevision(r.oldPid);
+  if (fields.projectId && fields.projectId !== r.oldPid) bumpProjectRevision(fields.projectId);
+  render();
 }
 
 function deleteEvent(id) {
   // 虚拟事项（模板id@日期）：删除作用于整个重复系列（模板）
-  if (id.includes('@')) id = id.slice(0, id.lastIndexOf('@'));
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
+  const r = TTCore.opsTasks.removeEvent(id);
   // 回收站（P7.1）：删除前移入回收站，支持撤销恢复
-  if (ev) saveTrashEvents(trashPush(loadTrashEvents(), ev));
-  saveEvents(all.filter(e => e.id !== id));
-  addTombstone(id, 'event');   // 同步墓碑（P3.4）：删除传播
-  if (ev && ev.projectId) bumpProjectRevision(ev.projectId);
+  if (r.ev) saveTrashEvents(trashPush(loadTrashEvents(), r.ev));
+  addTombstone(r.id, 'event');   // 同步墓碑（P3.4）：删除传播
+  if (r.ev && r.ev.projectId) bumpProjectRevision(r.ev.projectId);
   render();
   // 撤销删除（P7.1）：6 秒内可从 toast 撤销
-  if (ev) showActionToast(`已删除「${ev.title}」`, '撤销', () => {
-    if (restoreFromTrash([id])) showToast('已恢复');
+  if (r.ev) showActionToast(`已删除「${r.ev.title}」`, '撤销', () => {
+    if (restoreFromTrash([r.id])) showToast('已恢复');
     else showToast('未能恢复（回收站中已不存在）');
   });
 }
 
 function toggleDone(id) {
   // 虚拟事项（重复投影）：完成态按日 override，不改模板 done
-  if (id.includes('@')) {
-    const i = id.lastIndexOf('@');
-    const evId = id.slice(0, i), dKey = id.slice(i + 1);
-    recurDoneSet(evId, dKey, !recurDoneGet(evId, dKey));
-    render();
-    return;
+  const r = TTCore.opsTasks.toggleDone(id);
+  if (r.virtual) { render(); return; }
+  if (r.changed) { bumpProjectRevision(r.projectId); render(); }
+}
+// V3：项目完成切换——仅改项目自身状态，不擅自改动其下阶段和事项
+function toggleProjectComplete(pid) {
+  const p = getProject(pid);
+  if (!p) return;
+  if (!p.isCompleted) {
+    // 标记完成前提示：仍有未完成事项时不擅自改动，仅给出确认提示
+    const tasks = loadEvents().filter(e => e.projectId === pid);
+    const undone = tasks.filter(t => !t.done).length;
+    if (undone > 0 && !confirm(`该项目下还有 ${undone} 个未完成事项。\n仍要标记项目为完成吗？（不会改动子事项状态）`)) return;
   }
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
-  if (ev) {
-    ev.done = !ev.done;
-    ev.updatedAt = new Date().toISOString();
-    saveEvents(all);
-    bumpProjectRevision(ev.projectId);
-    render();
-  }
+  if (TTCore.opsProjects.toggleProjectComplete(pid)) render();
+}
+// V3：阶段完成切换——仅改阶段自身状态，不擅自改动其下事项
+function togglePhaseComplete(projectId, phaseId) {
+  if (TTCore.opsProjects.togglePhaseComplete(projectId, phaseId)) render();
 }
 
 // 置顶/取消置顶（P10.1）：仅本机显示偏好——不进同步快照（normTaskSnap 白名单外）、
 // 不递增 revision、不更新 updatedAt，避免触发三方合并与局域网同步 diff
 function toggleEventPin(id) {
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
-  if (!ev) return;
-  if (ev.pinned) { delete ev.pinned; delete ev.pinnedAt; }
-  else { ev.pinned = true; ev.pinnedAt = new Date().toISOString(); }
-  saveEvents(all);
-  render();
+  if (TTCore.opsTasks.toggleEventPin(id)) render();
 }
 function toggleProjectPin(pid) {
-  const all = loadProjects();
-  const p = all.find(x => x.id === pid);
-  if (!p) return;
-  if (p.pinned) { delete p.pinned; delete p.pinnedAt; }
-  else { p.pinned = true; p.pinnedAt = new Date().toISOString(); }
-  saveProjects(all);
-  render();
+  if (TTCore.opsProjects.toggleProjectPin(pid)) render();
 }
 
 // 将事项移动到指定日期：多日事项整体平移（保持持续天数），单日事项直接改期；
 // 虚拟投影 id（模板id@日期）解析为模板（拖拽/右键改期共用，语义：重复系列整体改起始日）
 function moveEventToDate(id, newDateKey) {
-  if (id.includes('@')) id = id.slice(0, id.lastIndexOf('@'));
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
-  if (ev) {
-    const oldStart = eventStart(ev);
-    const oldEnd = eventEnd(ev);
-    if (oldStart && oldEnd && oldEnd !== oldStart) {
-      const delta = Math.round((parseDateKey(newDateKey) - parseDateKey(oldStart)) / 86400000);
-      ev.startDate = newDateKey;
-      ev.endDate = addDaysKey(oldEnd, delta);
-    } else {
-      ev.startDate = newDateKey;
-      ev.endDate = newDateKey;
-    }
-    ev.date = ev.startDate;
-    ev.updatedAt = new Date().toISOString();
-    saveEvents(all);
-    bumpProjectRevision(ev.projectId);
-    render();
-  }
+  const r = TTCore.opsTasks.moveEventToDate(id, newDateKey);
+  if (r.ok) { bumpProjectRevision(r.projectId); render(); }
 }
 
 // 将事项调整到项目（pid 为空 = 未归类）
 function moveEventToProject(id, pid) {
-  const all = loadEvents();
-  const ev = all.find(e => e.id === id);
-  if (ev) {
-    const oldPid = ev.projectId;
-    ev.projectId = pid || null;
-    ev.updatedAt = new Date().toISOString();
-    saveEvents(all);
-    if (oldPid) bumpProjectRevision(oldPid);
-    if (ev.projectId && ev.projectId !== oldPid) bumpProjectRevision(ev.projectId);
-    render();
-  }
+  const r = TTCore.opsTasks.moveEventToProject(id, pid);
+  if (!r.ok) return;
+  if (r.oldPid) bumpProjectRevision(r.oldPid);
+  if (r.projectId && r.projectId !== r.oldPid) bumpProjectRevision(r.projectId);
+  render();
 }
 
 // 完成指定日期的全部事项（含重复事项该日投影 → 写按日 override）
@@ -3394,43 +3426,17 @@ function markAllDone() {
 
 // ============ 项目操作 ============
 function addProject(fields) {
-  const list = loadProjects();
-  list.push({
-    id: 'p' + String(Date.now()) + Math.random().toString(36).slice(2, 6),
-    name: fields.name,
-    description: fields.description || '',
-    startDate: fields.startDate || '',
-    endDate: fields.endDate || fields.startDate || '',
-    category: fields.category || 'work',
-    priority: fields.priority || 'medium',
-    status: 'active',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  });
-  saveProjects(list);
+  TTCore.opsProjects.createProject(fields);
   render();
 }
 
 function updateProject(id, fields) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === id);
-  if (p) {
-    Object.assign(p, fields, { revision: (p.revision || 1) + 1, updatedAt: new Date().toISOString() });
-    saveProjects(list);
-    render();
-  }
+  if (TTCore.opsProjects.updateProject(id, fields)) render();
 }
 
 function deleteProject(id) {
-  saveProjects(loadProjects().filter(p => p.id !== id));
+  TTCore.opsProjects.removeProject(id);
   addTombstone(id, 'project');   // 同步墓碑（P3.4）：删除传播
-  // 项目下事项 → 未归类
-  const all = loadEvents();
-  let changed = false;
-  for (const ev of all) {
-    if (ev.projectId === id) { ev.projectId = null; changed = true; }
-  }
-  if (changed) saveEvents(all);
   if (expandedProjectId === id) expandedProjectId = null;
   delete projectDetailModes[id];
   // 清理该项目的同步基准
@@ -3442,127 +3448,44 @@ function deleteProject(id) {
 // ============ 项目阶段（Phase）管理（P8.1） ============
 // 纯函数：生成阶段 id
 function genPhaseId() {
-  return 'ph' + String(Date.now()) + Math.random().toString(36).slice(2, 6);
+  return TTCore.opsProjects.genPhaseId();
 }
-// 新增阶段（返回新阶段对象）
-function addPhase(projectId, name) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === projectId);
-  if (!p) return null;
-  const phase = { id: genPhaseId(), name: String(name || '').trim() || '新阶段', order: p.phases.length, startDate: '', endDate: '' };
-  p.phases = p.phases || [];
-  p.phases.push(phase);
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
-  return phase;
+// 新增阶段（返回新阶段对象）；V3：fields 支持对象 {name, description, startDate, endDate}，兼容旧字符串调用
+function addPhase(projectId, fields) {
+  return TTCore.opsProjects.addPhase(projectId, fields);
 }
 // 重命名阶段
 function renamePhase(projectId, phaseId, name) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === projectId);
-  if (!p) return false;
-  const ph = (p.phases || []).find(x => x.id === phaseId);
-  if (!ph) return false;
-  ph.name = String(name || '').trim() || ph.name;
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
-  return true;
+  return TTCore.opsProjects.renamePhase(projectId, phaseId, name);
 }
 // 移动阶段顺序（dir: -1 上移 / 1 下移）
 function movePhase(projectId, phaseId, dir) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === projectId);
-  if (!p || !p.phases) return false;
-  const i = p.phases.findIndex(x => x.id === phaseId);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= p.phases.length) return false;
-  const tmp = p.phases[i]; p.phases[i] = p.phases[j]; p.phases[j] = tmp;
-  p.phases.forEach((ph, k) => { ph.order = k; });
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
-  return true;
+  return TTCore.opsProjects.movePhase(projectId, phaseId, dir);
 }
 // 删除阶段：该阶段下所有事项 phaseId 置空（归为未分阶段）
 function deletePhase(projectId, phaseId) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === projectId);
-  if (!p || !p.phases) return false;
-  p.phases = p.phases.filter(x => x.id !== phaseId);
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
-  // 清空该阶段事项的 phaseId
-  const all = loadEvents();
-  let changed = false;
-  for (const ev of all) {
-    if (ev.phaseId === phaseId) { ev.phaseId = ''; changed = true; }
-  }
-  if (changed) saveEvents(all);
-  return true;
+  return TTCore.opsProjects.deletePhase(projectId, phaseId);
 }
 // 设置阶段起止日期（P9.1）：仅改阶段自身，绝不自动改动事项日期；倒挂自动交换
 function setPhaseDates(projectId, phaseId, startDate, endDate) {
-  const list = loadProjects();
-  const p = list.find(x => x.id === projectId);
-  if (!p || !Array.isArray(p.phases)) return false;
-  const ph = p.phases.find(x => x.id === phaseId);
-  if (!ph) return false;
-  let s = String(startDate || '');
-  let e = String(endDate || '');
-  if (s && e && e < s) { const t = s; s = e; e = t; }
-  if (ph.startDate === s && ph.endDate === e) return true;
-  ph.startDate = s; ph.endDate = e;
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
-  return true;
+  return TTCore.opsProjects.setPhaseDates(projectId, phaseId, startDate, endDate);
 }
 // 纯函数（P9.1）：事项按阶段分组。阶段按 order 排列，空阶段保留成组；未分阶段事项归末尾 null 组（有事项才成组）
 function groupTasksByPhase(project, tasks) {
-  const phases = (project && Array.isArray(project.phases)) ? project.phases.slice().sort((a, b) => (a.order || 0) - (b.order || 0)) : [];
-  const groups = phases.map(phase => ({ phase, tasks: [] }));
-  const idx = new Map(phases.map((ph, i) => [ph.id, i]));
-  const loose = [];
-  for (const t of tasks || []) {
-    const gi = t.phaseId ? idx.get(t.phaseId) : undefined;
-    if (gi === undefined) loose.push(t);
-    else groups[gi].tasks.push(t);
-  }
-  if (loose.length) groups.push({ phase: null, tasks: loose });
-  return groups;
+  return TTCore.analytics.groupTasksByPhase(project, tasks);
 }
 // 纯函数（P9.1）：阶段进度 = 完成事项数 / 阶段内事项总数；空阶段返回 0，杜绝除零
 function phaseProgress(tasks) {
-  const total = (tasks || []).length;
-  const done = (tasks || []).filter(t => t.done).length;
-  return { done, total, pct: total ? Math.round(done / total * 100) : 0 };
+  return TTCore.analytics.phaseProgress(tasks);
 }
 // 纯函数（P9.1）：超范围事项检测。仅当阶段与事项都有日期时判定：
 // 事项结束日 < 阶段开始日 → before；事项开始日 > 阶段结束日 → after
 function phaseRangeViolations(phases, tasks) {
-  const pmap = new Map((phases || []).map(ph => [ph.id, ph]));
-  const out = [];
-  for (const t of tasks || []) {
-    const ph = t.phaseId ? pmap.get(t.phaseId) : null;
-    if (!ph || !ph.startDate || !ph.endDate) continue;
-    const s = eventStart(t), e = eventEnd(t) || s;
-    if (!s) continue;
-    if (e < ph.startDate) out.push({ taskId: t.id, phaseId: ph.id, dir: 'before' });
-    else if (s > ph.endDate) out.push({ taskId: t.id, phaseId: ph.id, dir: 'after' });
-  }
-  return out;
+  return TTCore.analytics.phaseRangeViolations(phases, tasks);
 }
 // 纯函数：获取项目阶段名称映射（{phaseId: name}），便于事项显示阶段标签
 function phaseNameMap(projectId) {
-  const p = getProject(projectId);
-  const m = {};
-  if (p && Array.isArray(p.phases)) {
-    for (const ph of p.phases) m[ph.id] = ph.name;
-  }
-  return m;
+  return TTCore.analytics.phaseNameMap(projectId);
 }
 // 事项阶段小标签 HTML（P8.1）：用于甘特图事项条前
 function phaseBadgeHtml(ev) {
@@ -3823,13 +3746,7 @@ function addSyncLog(action, opts = {}) {
 
 // 项目 revision 自增（本地内容变化时调用；导入/合并直接写值，不经此函数）
 function bumpProjectRevision(pid) {
-  if (!pid) return;
-  const list = loadProjects();
-  const p = list.find(x => x.id === pid);
-  if (!p) return;
-  p.revision = (p.revision || 1) + 1;
-  p.updatedAt = new Date().toISOString();
-  saveProjects(list);
+  TTCore.opsProjects.bumpProjectRevision(pid);
 }
 
 // 事项规范化快照（比较/导出用；date 由 startDate 派生，不参与比较）
@@ -4334,7 +4251,7 @@ function applyImportNew() {
   for (const t of incoming.tasks) {
     const ev = eventFromIncoming(t, pid, '');
     if (existingIds.has(ev.id)) {
-      ev.id = 't' + Date.now() + Math.random().toString(36).slice(2, 6);
+      ev.id = TTCore.ids.mkImportEventId();
       remapCount++;
       existingIds.add(ev.id);
     }
@@ -4789,8 +4706,34 @@ function showReminderToast(ev, aheadMin) {
   }
   const prefix = aheadMin > 0 ? `提前 ${aheadMin} 分钟提醒：` : '到点提醒：';
   t.classList.remove('error');   // 复用 .toast 元素，清掉写入失败的红色态（P6.3）
-  // P7.3：贪睡时长三档可选 + 「不再提醒」（当日对该事项静默）
-  t.innerHTML = `<span class="toast-msg">${prefix}${escapeHtml(ev.title)}</span><span class="toast-acts"><button class="toast-done" type="button">完成</button><button class="toast-snooze" data-min="5" type="button">5 分</button><button class="toast-snooze" data-min="10" type="button">10 分</button><button class="toast-snooze" data-min="30" type="button">30 分</button><button class="toast-stop" type="button">不再提醒</button></span>`;
+  // V3：右下角弹窗内容扩展——项目/阶段/起止时间/优先级/提醒时间（无项目→独立事项，无阶段→未分配阶段）
+  const p = ev.projectId ? getProject(ev.projectId) : null;
+  let phName = '';
+  if (p && ev.phaseId && Array.isArray(p.phases)) {
+    const ph = p.phases.find(x => x.id === ev.phaseId);
+    if (ph) phName = ph.name;
+  }
+  const s = eventStart(ev), e = eventEnd(ev);
+  const u = URGENCIES[ev.urgency] || URGENCIES.normal;
+  const timeRange = s ? (e && e !== s ? `${fmtShort(s)}~${fmtShort(e)}` : fmtShort(s)) : '无日期';
+  const remindTime = aheadMin > 0 ? `提前 ${aheadMin} 分钟` : '到点';
+  t.innerHTML = `
+    <span class="toast-msg">${escapeHtml(ev.title)}</span>
+    <div class="toast-remind-meta">
+      <span class="rm-label">${p ? escapeHtml(p.name) : '独立事项'}</span>
+      <span class="rm-label">${phName ? escapeHtml(phName) : '未分配阶段'}</span>
+      <span class="rm-label rm-pri" style="color:${u.color}">${u.label}</span>
+      <span class="rm-label rm-time">${timeRange}${ev.time ? ' ' + escapeHtml(ev.time) : ''}</span>
+      <span class="rm-label">${remindTime}</span>
+    </div>
+    <div class="toast-remind-acts">
+      <button class="toast-done" type="button">完成</button>
+      <button class="toast-snooze" data-min="5" type="button">5 分</button>
+      <button class="toast-snooze" data-min="10" type="button">10 分</button>
+      <button class="toast-snooze" data-min="30" type="button">30 分</button>
+      <button class="toast-stop" type="button">不再提醒</button>
+    </div>
+  `;
   t.classList.add('show', 'toast-remind');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
@@ -5030,297 +4973,30 @@ function showExtReminderToast(d) {
 // ============ iCal 互通（P4.3）：导出 .ics / 导入 .ics ============
 // 约定：本机浮点时间，不写 TZID/VTIMEZONE（与 app 内"时间即本地墙钟"语义一致，不做时区换算）；
 // 输出按 RFC 5545 用 CRLF 换行；导出不折叠长行（多数日历软件可读），导入支持行折叠展开。
-const ICAL_BYDAY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];  // getDay() → RFC 5545 星期码
-
-// ics 文本转义（SUMMARY/DESCRIPTION/CATEGORIES 值；反斜杠最先处理防二次转义）
-function icsEscape(s) {
-  return String(s || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/;/g, '\\;')
-    .replace(/,/g, '\\,')
-    .replace(/\r\n|\r|\n/g, '\\n');
-}
-// ics 文本反转义：单趟替换，避免「\\n（字面反斜杠+n）」被误展开为换行
-function icsUnescape(s) {
-  return String(s || '').replace(/\\n|\\,|\\;|\\\\/g, (m) => {
-    if (m === '\\n') return '\n';
-    if (m === '\\,') return ',';
-    if (m === '\\;') return ';';
-    return '\\';
-  });
-}
-// 'YYYY-MM-DD' → 'YYYYMMDD'
-function icsDate(key) { return String(key || '').replace(/-/g, ''); }
-// 'HH:MM' → 'HHMMSS'（异常格式兜底 000000）
-function icsTime(time) {
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(time || ''));
-  if (!m) return '000000';
-  return pad2(+m[1]) + m[2] + '00';
-}
-// 重复规则 → RRULE 值（不重复/未知返回 ''；weekly 的 BYDAY 取开始日星期码）
-function recurToRrule(recur, startKey) {
-  if (!recur || !recur.freq || recur.freq === 'none') return '';
-  const n = Math.max(1, parseInt(recur.interval, 10) || 1);
-  let rule = '';
-  if (recur.freq === 'daily') rule = 'FREQ=DAILY;INTERVAL=' + n;
-  else if (recur.freq === 'weekdays') rule = 'FREQ=WEEKLY;INTERVAL=' + n + ';BYDAY=MO,TU,WE,TH,FR';
-  else if (recur.freq === 'weekly') {
-    const d = parseDateKey(startKey) || new Date();
-    rule = 'FREQ=WEEKLY;INTERVAL=' + n + ';BYDAY=' + ICAL_BYDAY[d.getDay()];
-  } else if (recur.freq === 'monthly') rule = 'FREQ=MONTHLY;INTERVAL=' + n;
-  else return '';
-  if (recur.until) rule += ';UNTIL=' + icsDate(recur.until) + 'T235959';
-  return rule;
-}
-// RRULE 值 → 重复规则（无法映射返回 null；调用方需落"不重复 + 备注说明"）
-function rruleToRecur(rule, startKey) {
-  if (!rule) return null;
-  const parts = {};
-  for (const seg of String(rule).split(';')) {
-    const i = seg.indexOf('=');
-    if (i > 0) parts[seg.slice(0, i).toUpperCase()] = seg.slice(i + 1);
-  }
-  const freq = (parts.FREQ || '').toUpperCase();
-  const n = Math.max(1, parseInt(parts.INTERVAL, 10) || 1);
-  let freqKey = null;
-  if (freq === 'DAILY') freqKey = 'daily';
-  else if (freq === 'WEEKLY') {
-    const days = (parts.BYDAY || '').toUpperCase().split(',').map(s => s.trim()).filter(Boolean);
-    if (days.join(',') === 'MO,TU,WE,TH,FR') freqKey = 'weekdays';
-    else if (days.length === 1) freqKey = 'weekly';
-    // 其它 BYDAY 组合（如 MO,WE,FR）无法映射 → 落不重复
-  } else if (freq === 'MONTHLY') freqKey = 'monthly';
-  if (!freqKey) return null;
-  const recur = { freq: freqKey, interval: n, until: '' };
-  if (parts.UNTIL && /^\d{8}/.test(parts.UNTIL)) {
-    recur.until = parts.UNTIL.slice(0, 4) + '-' + parts.UNTIL.slice(4, 6) + '-' + parts.UNTIL.slice(6, 8);
-  }
-  return recur;   // weekly 的 BYDAY 由开始日星期码决定，导入时以 startKey 为准（与导出一致）
-}
+// M0：下列 iCal 纯函数全部迁至 src/core/ical.js（单一数据源），此处仅薄委托
+const ICAL_BYDAY = TTCore.ical.ICAL_BYDAY;  // getDay() → RFC 5545 星期码
+function icsEscape(s) { return TTCore.ical.icsEscape(s); }
+function icsUnescape(s) { return TTCore.ical.icsUnescape(s); }
+function icsDate(key) { return TTCore.ical.icsDate(key); }
+function icsTime(time) { return TTCore.ical.icsTime(time); }
+function recurToRrule(recur, startKey) { return TTCore.ical.recurToRrule(recur, startKey); }
+function rruleToRecur(rule, startKey) { return TTCore.ical.rruleToRecur(rule, startKey); }
 
 // 事项列表 → iCalendar 文本（每事项一个 VEVENT；now 参数仅供测试注入 DTSTAMP）
-function eventsToIcs(list, now) {
-  const stamp = now || new Date();
-  const dtStamp = stamp.getUTCFullYear() + pad2(stamp.getUTCMonth() + 1) + pad2(stamp.getUTCDate()) +
-    'T' + pad2(stamp.getUTCHours()) + pad2(stamp.getUTCMinutes()) + pad2(stamp.getUTCSeconds()) + 'Z';
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Timetable001//日程侧边栏//CN'];
-  for (const ev of (list || [])) {
-    const sKey = eventStart(ev);
-    if (!sKey) continue;                        // 无开始日期的异常数据跳过
-    const eKey = eventEnd(ev) || sKey;
-    lines.push('BEGIN:VEVENT');
-    lines.push('UID:' + icsEscape(ev.id || String(stamp.getTime())) + '@timetable.local');
-    lines.push('DTSTAMP:' + dtStamp);
-    if (!ev.time) {
-      // 全天：DTSTART 含首日，DTEND 为结束日 +1（RFC 5545 全天区间非包含）
-      lines.push('DTSTART;VALUE=DATE:' + icsDate(sKey));
-      lines.push('DTEND;VALUE=DATE:' + icsDate(addDaysKey(eKey, 1)));
-    } else {
-      // 有时间：DTEND 与结束时刻相同（app 内结束时刻为包含语义，导出按同时刻落盘）
-      const t = icsTime(ev.time);
-      lines.push('DTSTART:' + icsDate(sKey) + 'T' + t);
-      lines.push('DTEND:' + icsDate(eKey) + 'T' + t);
-    }
-    lines.push('SUMMARY:' + icsEscape(ev.title || '（无标题）'));
-    // 分类与标签：中文分类标签放首位，tags 并入 CATEGORIES（导入时反向解析，备注不重复携带 tags）
-    const cat = CATEGORIES[ev.category];
-    const cats = [cat ? cat.label : ''].concat(Array.isArray(ev.tags) ? ev.tags : []).filter(Boolean);
-    if (cats.length) lines.push('CATEGORIES:' + icsEscape(cats.join(',')));
-    if (ev.description) lines.push('DESCRIPTION:' + icsEscape(ev.description));
-    if (ev.done) lines.push('STATUS:COMPLETED');
-    const rrule = recurToRrule(ev.recur, sKey);
-    if (rrule) lines.push('RRULE:' + rrule);
-    lines.push('END:VEVENT');
-  }
-  lines.push('END:VCALENDAR');
-  return lines.join('\r\n') + '\r\n';
-}
+function eventsToIcs(list, now) { return TTCore.ical.eventsToIcs(list, now); }
 
-// 解析 ics 日期值 → { date: 'YYYY-MM-DD', time: 'HH:MM' | '', allDay, tzid }
-// VALUE=DATE 或纯 8 位日期为全天；Z 结尾 UTC 时间转换为本地墙钟（应用"时间即本地墙钟"约定）；
-// 浮动时间与 TZID 时间按本地处理，TZID 仅原样记录（无 tzdata，不做时区换算）
-function parseIcsDateVal(val, params) {
-  const v = String(val || '').trim();
-  const tzidM = /TZID=([^;:]+)/i.exec(params || '');
-  const tzid = tzidM ? tzidM[1].replace(/^"|"$/g, '') : '';
-  let m = /^(\d{4})(\d{2})(\d{2})$/.exec(v);
-  if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, time: '', allDay: true, tzid: '' };
-  if (/VALUE=DATE/i.test(params || '') && /^\d{8}/.test(v)) {
-    return { date: v.slice(0, 4) + '-' + v.slice(4, 6) + '-' + v.slice(6, 8), time: '', allDay: true, tzid: '' };
-  }
-  m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/.exec(v);
-  if (m) {
-    if (m[7]) {
-      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
-      return {
-        date: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
-        time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()), allDay: false, tzid: 'UTC'
-      };
-    }
-    return { date: `${m[1]}-${m[2]}-${m[3]}`, time: pad2(+m[4]) + ':' + pad2(+m[5]), allDay: false, tzid };
-  }
-  return null;
-}
+// ics 日期值 / UTC 时间戳 / VALARM 提醒解析（M0：迁至 src/core/ical.js）
+function parseIcsDateVal(val, params) { return TTCore.ical.parseIcsDateVal(val, params); }
+function icsStampToIso(val) { return TTCore.ical.icsStampToIso(val); }
+function parseIcsTriggerMinutes(val) { return TTCore.ical.parseIcsTriggerMinutes(val); }
 
-// ICS UTC 时间戳（CREATED/LAST-MODIFIED/DTSTAMP）→ ISO 字符串；无法解析返回 ''
-function icsStampToIso(val) {
-  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z?$/.exec(String(val || '').trim());
-  if (!m) return '';
-  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))).toISOString();
-}
+// 外部事件身份/内容哈希（M0：迁至 src/core/ical.js）
+function icsFallbackUid(ev) { return TTCore.ical.icsFallbackUid(ev); }
+function icsContentHash(ev) { return TTCore.ical.icsContentHash(ev); }
 
-// VALARM TRIGGER 负向 DURATION → 提前分钟数（-PT15M→15，-PT1H30M→90，-P1D→1440，-PT0D→0）；
-// 绝对触发时间（VALUE=DATE-TIME）与正向/无法识别的格式返回 null
-function parseIcsTriggerMinutes(val) {
-  const s = String(val || '').trim().toUpperCase();
-  if (!s.startsWith('-')) return null;
-  const body = s.slice(1);
-  if (body === 'PT0D' || body === 'P0D') return 0;   // 宽容：部分源把零时长写成 -PT0D
-  const m = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(body);
-  if (!m) return null;
-  const weeks = +(m[1] || 0), days = +(m[2] || 0), hours = +(m[3] || 0), mins = +(m[4] || 0);
-  if (!weeks && !days && !hours && !mins) return 0;   // -PT0D / -P0D
-  return weeks * 7 * 24 * 60 + days * 24 * 60 + hours * 60 + mins;
-}
-
-// 外部事件稳定身份兜底：UID 缺失时用内容字段哈希（djb2，base36）
-function icsFallbackUid(ev) {
-  const basis = [ev.title, ev.startDate, ev.endDate, ev.time, ev.allDay ? 'd' : 't'].join('|');
-  let h = 5381;
-  for (let i = 0; i < basis.length; i++) { h = ((h << 5) + h + basis.charCodeAt(i)) >>> 0; }
-  return 'h:' + h.toString(36);
-}
-
-// 外部事件内容版本哈希：sequence/updatedAt 之外的字段级变更兜底判定（FNV-1a，base36）
-function icsContentHash(ev) {
-  const basis = [ev.title, ev.startDate, ev.endDate, ev.time, ev.allDay ? 1 : 0, ev.location || '',
-    ev.description || '', ev.status || '', ev.remindAhead === null ? '' : ev.remindAhead,
-    ev.recur ? JSON.stringify(ev.recur) : ''].join('');
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < basis.length; i++) { h ^= basis.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return (h >>> 0).toString(36);
-}
-
-// 解析出的 VEVENT 块 → 外部事件字段（缺 DTSTART 的块返回 null 丢弃）
-// 注意：文件导入为 Task 的出口只挑 Task 字段，下列外部字段（uid/status/…）不会写入业务库
-function normalizeIcsEvent(raw) {
-  const ds = raw._dtStart;
-  if (!ds) return null;
-  const de = raw._dtEnd;
-  let sKey = ds.date;
-  let eKey = (de && de.date) || ds.date;
-  if (ds.allDay && de && de.allDay && de.date > ds.date) {
-    eKey = addDaysKey(de.date, -1);             // 全天 DTEND 非包含 → 反推回包含式末日
-  } else if (!ds.allDay) {
-    eKey = (de && de.date) || ds.date;          // 有时间：DTEND 同结束时刻（跨天取结束日）
-  }
-  // 分类：CATEGORIES 中首个匹配中文标签的项 → category，其余项进 tags
-  let category = '';
-  const tags = [];
-  for (const t of raw.tags || []) {
-    const hit = Object.keys(CATEGORIES).find(k => CATEGORIES[k].label === t);
-    if (hit && !category) category = hit;
-    else if (!tags.includes(t)) tags.push(t);
-  }
-  let description = raw.description || '';
-  let recur = rruleToRecur(raw._rrule, sKey);
-  if (raw._rrule && !recur) {
-    // 不支持的重复规则：落不重复，规则原文追加进备注说明
-    recur = null;
-    description += (description ? '\n' : '') + `（原重复规则未支持导入：${raw._rrule}）`;
-  }
-  const ev = {
-    uid: String(raw.uid || '').trim(),
-    title: raw.title || '（无标题）',
-    description,
-    location: raw.location || '',
-    startDate: sKey,
-    endDate: eKey || sKey,
-    time: ds.allDay ? '' : (ds.time || ''),
-    allDay: !!ds.allDay,
-    tzid: ds.tzid || '',
-    status: String(raw.status || '').toUpperCase() === 'CANCELLED' ? 'cancelled' : 'confirmed',
-    sequence: Number.isFinite(raw.sequence) ? raw.sequence : 0,
-    createdAt: raw.createdAt || '',
-    updatedAt: raw.updatedAt || '',
-    category: category || 'work',
-    tags,
-    done: !!raw.done,
-    recur,
-    remindAhead: (raw.remindAhead === undefined || raw.remindAhead === null) ? null : raw.remindAhead
-  };
-  if (!ev.uid) ev.uid = icsFallbackUid(ev);
-  return ev;
-}
-
-// .ics 文本 → 事项字段列表（CRLF/LF 归一 + RFC 5545 行折叠展开 + VEVENT 块扫描）
-function parseIcs(text) {
-  const raw = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const folded = [];
-  for (const line of raw.split('\n')) {
-    if ((line.startsWith(' ') || line.startsWith('\t')) && folded.length) {
-      folded[folded.length - 1] += line.slice(1);   // 续行：去掉首个空白拼接
-    } else {
-      folded.push(line);
-    }
-  }
-  const blocks = [];
-  let cur = null;
-  let inAlarm = false;
-  for (const line of folded) {
-    if (line === 'BEGIN:VEVENT') { cur = { tags: [] }; inAlarm = false; continue; }
-    if (line === 'BEGIN:VALARM') { inAlarm = true; continue; }
-    if (line === 'END:VALARM') { inAlarm = false; continue; }
-    if (line === 'END:VEVENT') {
-      if (cur) blocks.push(cur);
-      cur = null;
-      inAlarm = false;
-      continue;
-    }
-    if (!cur || !line) continue;
-    const colon = line.indexOf(':');
-    if (colon < 0) continue;
-    const head = line.slice(0, colon);
-    const val = line.slice(colon + 1);
-    const semi = head.indexOf(';');
-    const name = (semi < 0 ? head : head.slice(0, semi)).toUpperCase();
-    const params = semi < 0 ? '' : head.slice(semi + 1);
-    // VALARM 内只取 TRIGGER（其他行不覆盖事件本体）；只支持事件开始前的负向 DURATION
-    if (inAlarm) {
-      if (name === 'TRIGGER' && cur.remindAhead === undefined) {
-        const mins = parseIcsTriggerMinutes(val);
-        if (mins !== null) cur.remindAhead = mins;
-      }
-      continue;
-    }
-    if (name === 'SUMMARY') cur.title = icsUnescape(val).trim();
-    else if (name === 'DESCRIPTION') cur.description = icsUnescape(val).trim();
-    else if (name === 'LOCATION') cur.location = icsUnescape(val).trim();
-    else if (name === 'UID') cur.uid = icsUnescape(val).trim();
-    else if (name === 'SEQUENCE') { const n = parseInt(val.trim(), 10); if (Number.isFinite(n)) cur.sequence = n; }
-    else if (name === 'CREATED') cur.createdAt = icsStampToIso(val);
-    else if (name === 'LAST-MODIFIED') cur.updatedAt = icsStampToIso(val);
-    else if (name === 'DTSTAMP') cur.dtstamp = icsStampToIso(val);
-    else if (name === 'STATUS') {
-      const st = val.trim().toUpperCase();
-      cur.status = st;
-      if (st === 'COMPLETED') cur.done = true;
-    }
-    else if (name === 'CATEGORIES') {
-      for (const c of icsUnescape(val).split(',')) {
-        const t = c.trim();
-        if (t) cur.tags.push(t);
-      }
-    } else if (name === 'DTSTART') cur._dtStart = parseIcsDateVal(val, params);
-    else if (name === 'DTEND') cur._dtEnd = parseIcsDateVal(val, params);
-    else if (name === 'RRULE') cur._rrule = val.trim();
-  }
-  return blocks.map(b => {
-    if (!b.updatedAt && b.dtstamp) b.updatedAt = b.dtstamp;
-    if (!b.createdAt && b.dtstamp) b.createdAt = b.dtstamp;
-    return normalizeIcsEvent(b);
-  }).filter(Boolean);
-}
+// 解析 VEVENT 块 / .ics 文本（M0：迁至 src/core/ical.js）
+function normalizeIcsEvent(raw) { return TTCore.ical.normalizeIcsEvent(raw); }
+function parseIcs(text) { return TTCore.ical.parseIcs(text); }
 
 // iCal 导入预览状态：[{ ev, checked, dup }]；dup = 与现有事项疑似重复（同标题/日期/时间）
 let icalImportItems = null;
@@ -5601,194 +5277,28 @@ function renderTool() {
 let pendingQuickAddText = '';
 
 // ============ 自然语言解析（P5.2 纯函数） ============
-// 从标题剥离日期/时间短语 → { title, date, time, hits }
-// date: 'YYYY-MM-DD'，time: 'HH:MM'，未命中为 ''；hits 为命中的原始片段
-// 规则：先绝对后相对、先长词后短词；剥离后标题为空则整体不解析（避免"周五"这类词被误清空）
-const CN_DIG = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
-const CN_WEEK = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 0, 天: 0 };
-// 中文/阿拉伯数字串 → 整数（0~99，支持"二十三"）；无法解析返回 NaN
-function parseCnNum(s) {
-  if (/^\d{1,2}$/.test(s)) return parseInt(s, 10);
-  if (!s) return NaN;
-  const ten = s.indexOf('十');
-  if (ten === -1) return CN_DIG[s] !== undefined ? CN_DIG[s] : NaN;
-  const b = s.slice(0, ten), a = s.slice(ten + 1);
-  const tens = b ? CN_DIG[b] : 1, ones = a ? CN_DIG[a] : 0;
-  if (tens === undefined || ones === undefined) return NaN;
-  return tens * 10 + ones;
-}
-// 时段前缀映射小时数：中午12点→12、下午X点(+12)、晚上X点(≤11+12，12→0)、上午/早上/凌晨原值
-function mapDaypart(part, h) {
-  if (!part) return h;
-  if (part === '中午') return 12;
-  if (part === '下午') return h === 12 ? 12 : (h >= 1 && h <= 11 ? h + 12 : h);
-  if (part === '晚上') return h === 12 ? 0 : (h <= 11 ? h + 12 : h);
-  return h;
-}
-function parseQuickInput(text, now) {
-  now = now || today();
-  const original = String(text || '').trim();
-  let work = original;
-  let dateK = '', timeS = '';
-  const hits = [];
-  // 命中片段从工作串剥离（以空格占位，最终压缩空白）
-  const take = (m) => {
-    hits.push(m[0]);
-    work = work.slice(0, m.index) + ' ' + work.slice(m.index + m[0].length);
-  };
-  const t0 = stripTime(now);
-  const setDate = (d) => { if (!dateK) dateK = dateKey(d); };
-  // 相对时长（分钟）→ date（未设时取计算日）+ time
-  const applyRelTime = (mins) => {
-    const d = new Date(now.getTime() + mins * 60000);
-    if (!dateK) dateK = dateKey(d);
-    timeS = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
-  };
-
-  // —— 日期词表（先绝对后相对）——
-  // YYYY-MM-DD
-  let m = work.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31) { setDate(new Date(+m[1], +m[2] - 1, +m[3])); take(m); }
-  // X月X号/日（年份取未来最近：已过 → 明年）
-  if (!dateK && (m = work.match(/(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*月\s*(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*[号日]/))) {
-    const mo = parseCnNum(m[1]), da = parseCnNum(m[2]);
-    if (mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
-      let cand = new Date(t0.getFullYear(), mo - 1, da);
-      if (cand < t0) cand = new Date(t0.getFullYear() + 1, mo - 1, da);
-      if (cand.getDate() === da) { setDate(cand); take(m); }
-    }
-  }
-  // MM-DD（未来最近：已过 → 明年）
-  if (!dateK && (m = work.match(/(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)/))) {
-    const mo = +m[1], da = +m[2];
-    if (mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
-      let cand = new Date(t0.getFullYear(), mo - 1, da);
-      if (cand < t0) cand = new Date(t0.getFullYear() + 1, mo - 1, da);
-      if (cand.getDate() === da) { setDate(cand); take(m); }
-    }
-  }
-  // X号/X日（本月；已过 → 下月）
-  if (!dateK && (m = work.match(/(?<![\d月])(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*[号日](?!内)/))) {
-    const da = parseCnNum(m[1]);
-    if (da >= 1 && da <= 31) {
-      let cand = new Date(t0.getFullYear(), t0.getMonth(), da);
-      if (cand < t0) cand = new Date(t0.getFullYear(), t0.getMonth() + 1, da);
-      if (cand.getDate() === da) { setDate(cand); take(m); }
-    }
-  }
-  // 大后天/后天/明天/今晚/今天（今晚额外默认 19:00，纯"今晚"才有别于"今天"）
-  if (!dateK && (m = work.match(/大后天|后天|明天|今晚|今天/))) {
-    setDate(addDays(t0, { 大后天: 3, 后天: 2, 明天: 1, 今晚: 0, 今天: 0 }[m[0]]));
-    if (m[0] === '今晚' && !timeS) timeS = '19:00';
-    take(m);
-  }
-  // N天后（阿拉伯或中文数字 1~99）
-  if (!dateK && (m = work.match(/(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*天\s*之?后/))) {
-    const n = parseCnNum(m[1]);
-    if (n >= 1 && n <= 99) { setDate(addDays(t0, n)); take(m); }
-  }
-  // 下周X（强制下一自然周，周一起算）
-  if (!dateK && (m = work.match(/下(?:周|星期|礼拜)\s*([一二三四五六日天])/))) {
-    const tgt = CN_WEEK[m[1]];
-    if (tgt !== undefined) {
-      const wd = (t0.getDay() + 6) % 7;              // 周一=0 … 周日=6
-      setDate(addDays(t0, (7 - wd) + ((tgt + 6) % 7)));
-      take(m);
-    }
-  }
-  // 周X/星期X（未来最近该日，含今天）
-  if (!dateK && (m = work.match(/(?:周|星期|礼拜)\s*([一二三四五六日天])/))) {
-    const tgt = CN_WEEK[m[1]];
-    if (tgt !== undefined) {
-      setDate(addDays(t0, (tgt - t0.getDay() + 7) % 7));
-      take(m);
-    }
-  }
-
-  // —— 时间词表（先绝对后相对、先带时段后裸写）——
-  // 时段 + HH:MM（下午3:30 → 15:30）
-  m = work.match(/(上午|早上|凌晨|中午|下午|晚上)?\s*(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/);
-  if (m) {
-    const h = mapDaypart(m[1], +m[2]);
-    if (h >= 0 && h <= 23) { timeS = pad2(h) + ':' + m[3]; take(m); }
-  }
-  // 时段 + X点[半/Y分/整]
-  if (!timeS && (m = work.match(/(上午|早上|凌晨|中午|下午|晚上)\s*(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*点(?:\s*(半|整|(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*分))?/))) {
-    const h = mapDaypart(m[1], parseCnNum(m[2]));
-    const min = m[3] === '半' ? 30 : (m[4] !== undefined ? parseCnNum(m[4]) : 0);
-    if (h >= 0 && h <= 23 && min >= 0 && min <= 59) { timeS = pad2(h) + ':' + pad2(min); take(m); }
-  }
-  // 裸 HH:MM
-  if (!timeS && (m = work.match(/(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/))) {
-    timeS = pad2(+m[1]) + ':' + m[2]; take(m);
-  }
-  // 裸 X点[半/Y分/整]（前一位不能是数字/点，避免命中已剥离内容的残段）
-  if (!timeS && (m = work.match(/(?<![\d点])(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*点(?:\s*(半|整|(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*分))?/))) {
-    const h = parseCnNum(m[1]);
-    const min = m[2] === '半' ? 30 : (m[3] !== undefined ? parseCnNum(m[3]) : 0);
-    if (h >= 0 && h <= 23 && min >= 0 && min <= 59) { timeS = pad2(h) + ':' + pad2(min); take(m); }
-  }
-  // 半小时后 / N小时后 / N分钟后（相对 now，产生 date+time；date 已设则仅回填时间）
-  if (!timeS && (m = work.match(/半\s*个?\s*小时后/))) { applyRelTime(30); take(m); }
-  if (!timeS && (m = work.match(/(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*个?\s*小时后/))) {
-    const n = parseCnNum(m[1]);
-    if (n >= 1 && n <= 23) { applyRelTime(n * 60); take(m); }
-  }
-  if (!timeS && (m = work.match(/(\d{1,3}|[一二两三四五六七八九十]{1,3})\s*个?\s*分钟后/))) {
-    const n = parseCnNum(m[1]);
-    if (n >= 1 && n <= 720) { applyRelTime(n); take(m); }
-  }
-
-  const title = work.replace(/\s+/g, ' ').trim();
-  // 剥离后标题为空（或无任何命中）→ 整体不解析
-  if (!title || !hits.length) return { title: original, date: '', time: '', hits: [] };
-  return { title, date: dateK, time: timeS, hits };
-}
-// 解析预览文案（P5.2）：「→ 10/13(周二) 15:00」；无命中返回 ''
-function quickInputPreview(parsed) {
-  if (!parsed || (!parsed.date && !parsed.time)) return '';
-  const parts = [];
-  if (parsed.date) {
-    const d = parseDateKey(parsed.date);
-    parts.push(`${d.getMonth() + 1}/${d.getDate()}(周${'日一二三四五六'[d.getDay()]})`);
-  }
-  if (parsed.time) parts.push(parsed.time);
-  return '→ ' + parts.join(' ');
-}
+// 从标题剥离日期/时间短语（M0：词表与实现全部迁至 src/core/nlp.js，此处仅薄委托）
+function parseCnNum(s) { return TTCore.nlp.parseCnNum(s); }
+function mapDaypart(part, h) { return TTCore.nlp.mapDaypart(part, h); }
+function parseQuickInput(text, now) { return TTCore.nlp.parseQuickInput(text, now); }
+// 解析预览文案（P5.2）：无命中返回 ''
+function quickInputPreview(parsed) { return TTCore.nlp.quickInputPreview(parsed); }
 
 // ============ 事项模板（P5.3） ============
 // localStorage: eventTemplates = [{id, title, time, category, urgency, recur, tags, description, createdAt}]
-// 日期不入模板（应用时默认今天）；仅进三档备份（backup.js BUSINESS_KEYS），不进局域网同步快照
+// 日期不入模板（应用时默认今天）；仅进三档备份（backup-core.js BUSINESS_KEYS），不进局域网同步快照
 function loadEventTemplates() {
-  try {
-    const arr = JSON.parse(localStorage.getItem('eventTemplates') || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+  return TTCore.templates.loadEventTemplates();
 }
 function saveEventTemplates(arr) {
-  localStorage.setItem('eventTemplates', JSON.stringify(arr));
+  TTCore.templates.saveEventTemplates(arr);
 }
 // 事项存为模板：同 title+time 视为重复（跳过）；返回 'saved' | 'dup'
 function saveEventAsTemplate(ev) {
-  const list = loadEventTemplates();
-  const t = String(ev.title || '');
-  const tm = String(ev.time || '');
-  if (list.some(x => x.title === t && String(x.time || '') === tm)) return 'dup';
-  list.unshift({
-    id: 'tpl-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    title: t, time: tm,
-    category: ev.category || 'work',
-    urgency: ev.urgency || 'normal',
-    recur: ev.recur || null,
-    tags: Array.isArray(ev.tags) ? ev.tags.slice() : [],
-    description: String(ev.description || ''),
-    createdAt: new Date().toISOString()
-  });
-  saveEventTemplates(list);
-  return 'saved';
+  return TTCore.templates.saveEventAsTemplate(ev);
 }
 function deleteEventTemplate(id) {
-  saveEventTemplates(loadEventTemplates().filter(t => t.id !== id));
+  TTCore.templates.deleteEventTemplate(id);
 }
 // 快速添加面板的模板 chips 行 HTML：空模板返回 ''（整行隐藏）；默认最多 8 个 + 「…」展开
 let qaTplExpanded = false;   // chips 是否已展开（面板重绘间保持）
@@ -6262,134 +5772,20 @@ function buildPomodoro(panel) {
 // ---- 工具三：今日进度 / 统计 ----
 // ============ 数据统计与周报（P3.1；纯函数 + DOM 柱状图，不引图表库） ============
 // ISO 时间 → 本地日期 key（toISOString 为 UTC，直接 slice 会有时区偏差，统一转本地）
-function isoDateKey(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '' : dateKey(d);
-}
+function isoDateKey(iso) { return TTCore.dates.isoDateKey(iso); }
 // 周一为一周起始
-function startOfWeek(d) {
-  const r = stripTime(d);
-  const wd = (r.getDay() + 6) % 7;   // 周一=0 … 周日=6
-  return addDays(r, -wd);
-}
+function startOfWeek(d) { return TTCore.dates.startOfWeek(d); }
 // 生成连续日期 key 数组（从 startKey 起共 days 天）
-function dateKeyRange(startKey, days) {
-  const start = parseDateKey(startKey);
-  const out = [];
-  for (let i = 0; i < days; i++) out.push(dateKey(addDays(start, i)));
-  return out;
-}
+function dateKeyRange(startKey, days) { return TTCore.dates.dateKeyRange(startKey, days); }
 // 区间统计：每日新增/完成/专注 + 汇总 + 分类分布 + 项目排行
 // 口径：新增按 createdAt 日期；完成按 updatedAt 日期（仅 done 项）；未来日期不计入
 function buildStats(events, history, rangeDays, now) {
-  now = now || new Date();
-  const days = Math.max(1, rangeDays | 0);
-  const keys = dateKeyRange(dateKey(addDays(stripTime(now), -(days - 1))), days);
-  const idx = new Map(keys.map((k, i) => [k, i]));
-  const daily = keys.map(k => ({ date: k, created: 0, done: 0, focusCount: 0, focusMinutes: 0 }));
-  const focusMap = new Map((history || []).map(h => [h.date, h]));
-
-  let createdTotal = 0, doneTotal = 0;
-  const catCount = {};
-  const projDone = new Map();
-  for (const ev of events || []) {
-    const ci = idx.get(isoDateKey(ev.createdAt));
-    if (ci !== undefined) { daily[ci].created++; createdTotal++; }
-    if (ev.done) {
-      const di = idx.get(isoDateKey(ev.updatedAt || ev.createdAt));
-      if (di !== undefined) {
-        daily[di].done++; doneTotal++;
-        catCount[ev.category] = (catCount[ev.category] || 0) + 1;
-        if (ev.projectId) projDone.set(ev.projectId, (projDone.get(ev.projectId) || 0) + 1);
-      }
-    }
-  }
-  let focusCount = 0, focusMinutes = 0;
-  for (const d of daily) {
-    const h = focusMap.get(d.date);
-    if (h) { d.focusCount = h.count || 0; d.focusMinutes = h.minutes || 0; }
-    focusCount += d.focusCount; focusMinutes += d.focusMinutes;
-  }
-  const categories = Object.keys(CATEGORIES).map(k => ({
-    key: k, label: CATEGORIES[k].label, color: CATEGORIES[k].color, count: catCount[k] || 0
-  }));
-  // 项目排行：只列有事项的项目，按区间完成数降序（平局按项目名），最多 5 个
-  const projects = loadProjects().map(p => {
-    const total = (events || []).filter(e => e.projectId === p.id).length;
-    return { id: p.id, name: p.name, done: projDone.get(p.id) || 0, total };
-  }).filter(p => p.total > 0).sort((a, b) => (b.done - a.done) || a.name.localeCompare(b.name)).slice(0, 5);
-
-  // 连续专注 streak（P5.1）：从今天往前数连续有专注的天数；
-  // 今天尚无记录则从昨天起算（避免"当天还没专注"清零连续记录）
-  const focusMinMap = new Map((history || []).map(h => [h.date, h.minutes || 0]));
-  let streak = 0;
-  {
-    let cursor = stripTime(now);
-    if ((focusMinMap.get(dateKey(cursor)) || 0) <= 0) cursor = addDays(cursor, -1);
-    while ((focusMinMap.get(dateKey(cursor)) || 0) > 0) { streak++; cursor = addDays(cursor, -1); }
-  }
-
-  // 上一周期对照（P5.1）：区间整体前移同长度，口径与主区间一致
-  const pKeys = dateKeyRange(dateKey(addDays(stripTime(now), -(days * 2 - 1))), days);
-  const pIdx = new Map(pKeys.map((k, i) => [k, i]));
-  let prevCreated = 0, prevDone = 0, prevFocusMinutes = 0;
-  for (const ev of events || []) {
-    if (pIdx.has(isoDateKey(ev.createdAt))) prevCreated++;
-    if (ev.done && pIdx.has(isoDateKey(ev.updatedAt || ev.createdAt))) prevDone++;
-  }
-  for (const h of history || []) {
-    if (pIdx.has(h.date)) prevFocusMinutes += h.minutes || 0;
-  }
-
-  // 未完成积压（P5.1）：一次性事项按截止日分档；重复事项执行区间语义复杂，不计入
-  const tkNow = dateKey(now);
-  const backlog = { overdue: 0, today: 0, future: 0, undated: 0, urgent: 0 };
-  for (const ev of events || []) {
-    if (ev.done || isRecurOn(ev)) continue;
-    const s = eventStart(ev), e = eventEnd(ev) || s;
-    if (ev.urgency === 'urgent') backlog.urgent++;
-    if (!s) { backlog.undated++; continue; }
-    if (e < tkNow) backlog.overdue++;
-    else if (s <= tkNow) backlog.today++;
-    else backlog.future++;
-  }
-
-  return {
-    startKey: keys[0], endKey: keys[keys.length - 1], daily,
-    totals: {
-      createdTotal, doneTotal,
-      rate: createdTotal ? Math.round(doneTotal / createdTotal * 100) : 0,
-      focusCount, focusMinutes
-    },
-    categories, projects,
-    streak,
-    prev: { createdTotal: prevCreated, doneTotal: prevDone, focusMinutes: prevFocusMinutes },
-    backlog
-  };
+  return TTCore.analytics.buildStats(events, history, rangeDays, now);
 }
 
 // 本周 vs 上周对照（P5.1 纯函数）：完成/新增/专注分钟 三指标，固定按自然周（周一~周日）
 function weekCompare(events, history, now) {
-  now = now || new Date();
-  const wk = new Set(dateKeyRange(dateKey(startOfWeek(now)), 7));
-  const pw = new Set(dateKeyRange(dateKey(addDays(startOfWeek(now), -7)), 7));
-  let done = 0, created = 0, pDone = 0, pCreated = 0;
-  for (const ev of events || []) {
-    const ck = isoDateKey(ev.createdAt), dk = isoDateKey(ev.updatedAt || ev.createdAt);
-    if (wk.has(ck)) created++;
-    if (pw.has(ck)) pCreated++;
-    if (ev.done) {
-      if (wk.has(dk)) done++;
-      if (pw.has(dk)) pDone++;
-    }
-  }
-  let fm = 0, pfm = 0;
-  for (const h of history || []) {
-    if (wk.has(h.date)) fm += h.minutes || 0;
-    if (pw.has(h.date)) pfm += h.minutes || 0;
-  }
-  return { done, created, focusMinutes: fm, prev: { done: pDone, created: pCreated, focusMinutes: pfm } };
+  return TTCore.analytics.weekCompare(events, history, now);
 }
 
 // 年热力图（P7.5 纯函数）：GitHub 风格周对齐网格，53 列（周）× 7 行（周一~周日）
@@ -6397,103 +5793,18 @@ function weekCompare(events, history, now) {
 // 网格终点固定为 endKey 所在周的周日，向前铺满 371 格 → 覆盖 ≥365 天，首列可能前导空档（值 0）
 // 返回 { cells: [{date, value, level, col, row}], cols, rows, max }；level 0~4 五档色阶
 function buildHeatmap(daily, metric, endKey) {
-  const map = new Map((daily || []).map(d => [d.date, d]));
-  const end = parseDateKey(endKey) || new Date();
-  const endSunday = addDays(end, 6 - ((end.getDay() + 6) % 7));   // 所在周的周日（周一为一周之首）
-  const cells = [];
-  let max = 0;
-  for (let i = 0; i < 371; i++) {
-    const k = dateKey(addDays(endSunday, i - 370));
-    const rec = map.get(k);
-    const v = rec ? Math.max(0, Number(rec[metric]) || 0) : 0;
-    if (v > max) max = v;
-    cells.push({ date: k, value: v, col: Math.floor(i / 7), row: i % 7 });
-  }
-  // 分档：0 → 0 档；峰值 ≤4 时按值直接映射（低活跃也有梯度），否则按峰值比例分 4 段
-  for (const c of cells) {
-    if (!c.value) { c.level = 0; continue; }
-    if (max <= 4) { c.level = c.value; continue; }
-    const t = c.value / max;
-    c.level = t > 0.75 ? 4 : t > 0.5 ? 3 : t > 0.25 ? 2 : 1;
-  }
-  return { cells, cols: 53, rows: 7, max };
+  return TTCore.analytics.buildHeatmap(daily, metric, endKey);
 }
 // 每日工作记录（P8.2 纯函数）：指定日期的完成事项清单 + 专注汇总
 // 完成口径：ev.done 且 isoDateKey(updatedAt || createdAt) === dateKeyStr
 // 专注口径：history 中 date === dateKeyStr 的记录
 // doneItems 按 time 升序，无时间排最后
 function buildDailyWorkRecord(events, history, dateKeyStr, projects) {
-  const dk = String(dateKeyStr || '');
-  const projMap = new Map((projects || []).map(p => [p.id, p.name]));
-  const doneItems = (events || [])
-    .filter(ev => ev.done && isoDateKey(ev.updatedAt || ev.createdAt) === dk)
-    .map(ev => ({
-      id: ev.id,
-      title: ev.title || '',
-      time: ev.time || '',
-      projectName: ev.projectId ? (projMap.get(ev.projectId) || '未分类') : '未归类',
-      projectId: ev.projectId || ''
-    }))
-    .sort((a, b) => {
-      if (!!a.time !== !!b.time) return a.time ? -1 : 1;
-      return (a.time || '').localeCompare(b.time || '');
-    });
-  const h = (history || []).find(x => x.date === dk) || {};
-  return {
-    date: dk,
-    doneCount: doneItems.length,
-    focusCount: h.count || 0,
-    focusMinutes: h.minutes || 0,
-    doneItems
-  };
+  return TTCore.analytics.buildDailyWorkRecord(events, history, dateKeyStr, projects);
 }
 // 周报 Markdown：本周（周一~周日）完成事项按项目分组 + 专注汇总 + 每日完成条形
 function buildWeeklyReport(events, projects, history, now) {
-  now = now || new Date();
-  const ws = startOfWeek(now), we = addDays(ws, 6);
-  const wsK = dateKey(ws), weK = dateKey(we);
-  const keys = dateKeyRange(wsK, 7);
-  const inWeek = (k) => keys.includes(k);
-
-  let focusCount = 0, focusMinutes = 0;
-  for (const h of history || []) {
-    if (inWeek(h.date)) { focusCount += h.count || 0; focusMinutes += h.minutes || 0; }
-  }
-  const doneEvents = (events || []).filter(e => e.done && inWeek(isoDateKey(e.updatedAt || e.createdAt)));
-  const dayCount = keys.map(k => doneEvents.filter(e => isoDateKey(e.updatedAt || e.createdAt) === k).length);
-  const maxCount = Math.max(1, ...dayCount);
-  const WD = ['一', '二', '三', '四', '五', '六', '日'];
-  const barOf = (n) => '█'.repeat(Math.round(n / maxCount * 8)) + '░'.repeat(8 - Math.round(n / maxCount * 8));
-
-  const lines = [];
-  lines.push(`# 周报（${wsK} ~ ${weK}）`, '');
-  lines.push('## 专注概览', '');
-  lines.push(`- 完成专注：${focusCount} 个，共 ${focusMinutes} 分钟（约 ${(focusMinutes / 60).toFixed(1)} 小时）`);
-  lines.push(`- 完成事项：${doneEvents.length} 项`, '');
-  lines.push('## 每日完成', '');
-  keys.forEach((k, i) => {
-    const md = k.slice(5).replace('-', '/');
-    lines.push(`- ${md} 周${WD[i]}  ${dayCount[i]} ${barOf(dayCount[i])}`);
-  });
-  lines.push('', '## 完成事项', '');
-  if (!doneEvents.length) {
-    lines.push('本周暂无完成事项。', '');
-  } else {
-    // 按项目分组：项目按 projects 现有顺序，未归类放最后
-    const groups = [];
-    const pushGroup = (name, list) => { if (list.length) groups.push({ name, list }); };
-    for (const p of projects) {
-      pushGroup(p.name, doneEvents.filter(e => e.projectId === p.id));
-    }
-    pushGroup('未归类', doneEvents.filter(e => !e.projectId));
-    for (const g of groups) {
-      lines.push(`### ${g.name}（${g.list.length}）`, '');
-      for (const ev of g.list) lines.push(`- [x] ${ev.time ? ev.time + ' ' : ''}${ev.title}`);
-      lines.push('');
-    }
-  }
-  lines.push('> 由日程侧边栏自动生成');
-  return lines.join('\n');
+  return TTCore.analytics.buildWeeklyReport(events, projects, history, now);
 }
 
 // ---- 统计工具面板 ----

@@ -107,7 +107,23 @@
     </div>
   </div>
 
-  <script src="backup.js"></script>
+  <!-- M0 核心层：必须先于 app.js 加载（app.js 顶层即调用日期函数/读取常量） -->
+  <script src="../core/constants.js"></script>
+  <script src="../core/dates.js"></script>
+  <script src="../core/ids.js"></script>
+  <script src="../core/models.js"></script>
+  <script src="../core/storage.js"></script>
+  <script src="../core/checklist.js"></script>
+  <script src="../core/tags.js"></script>
+  <script src="../core/ical.js"></script>
+  <script src="../core/nlp.js"></script>
+  <script src="../core/templates.js"></script>
+  <script src="../core/analytics.js"></script>
+  <script src="../core/ops-tasks.js"></script>
+  <script src="../core/ops-projects.js"></script>
+  <script src="../core/backup-core.js"></script>
+  <script src="../core/index.js"></script>
+  <script src="platform.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

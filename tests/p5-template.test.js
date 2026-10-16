@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { loadApp, appEval, hostify } = require('./helpers');
 
-// backup.js 为渲染层全局脚本（window.Backup），在同一沙箱内求值读取导出
-const BACKUP_SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'backup.js'), 'utf8');
+// backup-core.js 为核心层全局脚本（window.Backup），在同一沙箱内求值读取导出（M0 已自 renderer/backup.js 平移）
+const BACKUP_SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'backup-core.js'), 'utf8');
 
 test('saveEventAsTemplate：保存字段快照且不携带日期字段', () => {
   const { sb } = loadApp();
@@ -63,7 +63,7 @@ test('BUSINESS_KEYS 含 eventTemplates（进三档备份，不进同步快照）
   appEval(sb, BACKUP_SRC);
   const keys = hostify(appEval(sb, 'window.Backup.BUSINESS_KEYS'));
   assert.ok(keys.includes('eventTemplates'), 'eventTemplates 应在 BUSINESS_KEYS 中');
-  const snapshot = hostify(appEval(sb, 'buildBackup("business").business'));
+  const snapshot = hostify(appEval(sb, 'window.Backup.buildBackup("business").business'));
   assert.ok('eventTemplates' in snapshot, 'business 备份应收集 eventTemplates');
 });
 

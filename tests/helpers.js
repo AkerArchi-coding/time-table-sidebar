@@ -9,6 +9,21 @@ const vm = require('node:vm');
 const APP_JS = path.join(__dirname, '..', 'src', 'renderer', 'app.js');
 const source = fs.readFileSync(APP_JS, 'utf8');
 
+// M0 核心层：显式有序加载清单（必须先于 app.js）。文件不存在则跳过，便于按切片增量接入。
+const CORE_DIR = path.join(__dirname, '..', 'src', 'core');
+const CORE_FILES = [
+  'constants.js', 'dates.js',
+  'ids.js', 'storage.js', 'models.js',
+  'checklist.js', 'tags.js', 'ical.js', 'nlp.js',
+  'templates.js', 'analytics.js',
+  'ops-tasks.js', 'ops-projects.js',
+  'backup-core.js',
+  'index.js'
+];
+
+// M0 渲染层：平台门面须在 app.js 之前加载（app.js 经 TTPlatform 注入宿主能力）
+const PLATFORM_JS = path.join(__dirname, '..', 'src', 'renderer', 'platform.js');
+
 // 桩：内存版 localStorage
 function memStorage() {
   const map = new Map();
@@ -97,6 +112,20 @@ function loadApp() {
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  // M0：先按序加载存在的 core 模块（app.js 依赖 TTCore 常量/日期函数）
+  for (const f of CORE_FILES) {
+    const p = path.join(CORE_DIR, f);
+    if (!fs.existsSync(p)) continue;
+    try {
+      vm.runInContext(fs.readFileSync(p, 'utf8'), sandbox, { filename: 'core/' + f });
+    } catch (e) {
+      sandbox.__coreError = e;
+    }
+  }
+  // M0 渲染层平台门面（先于 app.js）
+  if (fs.existsSync(PLATFORM_JS)) {
+    vm.runInContext(fs.readFileSync(PLATFORM_JS, 'utf8'), sandbox, { filename: 'renderer/platform.js' });
+  }
   try {
     vm.runInContext(source, sandbox, { filename: 'app.js' });
   } catch (e) {
