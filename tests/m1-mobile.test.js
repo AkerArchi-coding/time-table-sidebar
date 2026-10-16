@@ -107,3 +107,103 @@ test('M1: core 写操作在移动链下可用——toggleDone 后完成项排尾
   assert.strictEqual(last.title, '晨会');
   assert.strictEqual(last.done, true);
 });
+
+// ---------- M2 写操作闭环 ----------
+
+test('M2: 重复模板勾选走 recurDone（虚拟 id），不写模板本身', () => {
+  const sb = loadMobile();
+  const todayKey = sb.TTCore.dates.dateKey(new Date());
+  const items = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), todayKey));
+  const rec = items.find(i => i.title === '每日打卡（重复模板）');
+  assert.ok(rec.recur && rec.vid.includes('@'), '重复项应带虚拟 id');
+  assert.strictEqual(rec.done, false);
+  const r = sb.TTMobile.toggleItem(rec.vid);
+  assert.strictEqual(r.virtual, true);
+  assert.strictEqual(sb.TTCore.storage.recurDoneGet(rec.id, todayKey), true);
+  // 模板本身 done 不变
+  const tpl = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === rec.id);
+  assert.strictEqual(!!tpl.done, false);
+  // 模型反映完成态
+  const after = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), todayKey));
+  assert.strictEqual(after.find(i => i.vid === rec.vid).done, true);
+  // 再点取消
+  sb.TTMobile.toggleItem(rec.vid);
+  assert.strictEqual(sb.TTCore.storage.recurDoneGet(rec.id, todayKey), false);
+});
+
+test('M2: addItem 新增事项出现在当天模型', () => {
+  const sb = loadMobile();
+  const todayKey = sb.TTCore.dates.dateKey(new Date());
+  const before = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), todayKey)).length;
+  sb.TTMobile.addItem({ title: 'M2新增', startDate: todayKey, time: '15:00' });
+  const items = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), todayKey));
+  assert.strictEqual(items.length, before + 1);
+  const added = items.find(i => i.title === 'M2新增');
+  assert.ok(added && added.time === '15:00' && added.done === false);
+});
+
+test('M2: editItem 更新标题/时间/分类/紧急度生效', () => {
+  const sb = loadMobile();
+  const ev = hostify(sb.TTCore.storage.loadEvents()).find(e => e.title === '买菜');
+  sb.TTMobile.editItem(ev.id, { title: '买水果', time: '18:30', category: 'personal', urgency: 'urgent' });
+  const after = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === ev.id);
+  assert.strictEqual(after.title, '买水果');
+  assert.strictEqual(after.time, '18:30');
+  assert.strictEqual(after.category, 'personal');
+  assert.strictEqual(after.urgency, 'urgent');
+});
+
+test('M2: deleteItem 删除后模型与存储均无此项', () => {
+  const sb = loadMobile();
+  const todayKey = sb.TTCore.dates.dateKey(new Date());
+  const ev = hostify(sb.TTCore.storage.loadEvents()).find(e => e.title === '写周报');
+  const r = sb.TTMobile.deleteItem(ev.id);
+  assert.ok(r.ev && r.ev.title === '写周报');
+  const rest = hostify(sb.TTCore.storage.loadEvents());
+  assert.ok(!rest.some(e => e.id === ev.id));
+  const items = hostify(sb.TTMobile.collectDayItems(rest, todayKey));
+  assert.ok(!items.some(i => i.title === '写周报'));
+});
+
+test('M2: 重复模板删除解析虚拟 id（删模板本身）', () => {
+  const sb = loadMobile();
+  const todayKey = sb.TTCore.dates.dateKey(new Date());
+  const items = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), todayKey));
+  const rec = items.find(i => i.title === '每日打卡（重复模板）');
+  sb.TTMobile.deleteItem(rec.id); // UI 长按确认后传 real id
+  assert.ok(!hostify(sb.TTCore.storage.loadEvents()).some(e => e.id === rec.id));
+});
+
+test('M2: 多日任务按日完成——勾选一天不影响其他天，不写全局 done', () => {
+  const sb = loadMobile();
+  const D = sb.TTCore.dates;
+  const today = D.dateKey(new Date());
+  const d1 = D.addDaysKey(today, 1), d2 = D.addDaysKey(today, 2), d3 = D.addDaysKey(today, 3);
+  const ev = hostify(sb.TTCore.storage.loadEvents()).find(e => e.title === '多日活动示例');
+  assert.strictEqual(ev.startDate, d1); assert.strictEqual(ev.endDate, d3);
+  // 三天都出现且都有 @ 虚拟 id、multi=true
+  const day1 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d1));
+  const it1 = day1.find(i => i.title === '多日活动示例');
+  const it2 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d2)).find(i => i.title === '多日活动示例');
+  const it3 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d3)).find(i => i.title === '多日活动示例');
+  assert.ok(it1.multi && it2.multi && it3.multi);
+  assert.strictEqual(it1.vid, ev.id + '@' + d1);
+  assert.strictEqual(it1.done, false);
+  // 只勾选第 1 天
+  sb.TTMobile.toggleItem(it1.vid);
+  const after1 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d1)).find(i => i.title === '多日活动示例');
+  const after2 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d2)).find(i => i.title === '多日活动示例');
+  const after3 = hostify(sb.TTMobile.collectDayItems(sb.TTCore.storage.loadEvents(), d3)).find(i => i.title === '多日活动示例');
+  assert.strictEqual(after1.done, true);
+  assert.strictEqual(after2.done, false, '第 2 天不应被标记完成');
+  assert.strictEqual(after3.done, false, '第 3 天不应被标记完成');
+  // 全局 done 未被修改
+  const evAfter = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === ev.id);
+  assert.strictEqual(!!evAfter.done, false);
+  // recurDone 按日落键
+  assert.strictEqual(sb.TTCore.storage.recurDoneGet(ev.id, d1), true);
+  assert.strictEqual(sb.TTCore.storage.recurDoneGet(ev.id, d2), false);
+  // 再点第 1 天取消
+  sb.TTMobile.toggleItem(it1.vid);
+  assert.strictEqual(sb.TTCore.storage.recurDoneGet(ev.id, d1), false);
+});
