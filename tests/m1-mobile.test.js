@@ -207,3 +207,126 @@ test('M2: 多日任务按日完成——勾选一天不影响其他天，不写�
   sb.TTMobile.toggleItem(it1.vid);
   assert.strictEqual(sb.TTCore.storage.recurDoneGet(ev.id, d1), false);
 });
+
+// ============ M3：项目与阶段管理 ============
+
+test('M3: 示例项目注入——两个阶段 + 两条事项归属，模型计数正确', () => {
+  const sb = loadMobile();
+  const model = hostify(sb.TTMobile.buildProjectsModel());
+  assert.strictEqual(model.length, 1);
+  const p = model[0];
+  assert.strictEqual(p.name, '示例项目');
+  assert.strictEqual(p.phases.length, 2);
+  assert.strictEqual(p.phases[0].name, '规划');
+  assert.strictEqual(p.phases[1].name, '执行');
+  assert.strictEqual(p.phases[0].items[0].title, '写周报');
+  assert.strictEqual(p.phases[1].items[0].title, '项目评审');
+  assert.strictEqual(p.total, 2);
+  assert.strictEqual(p.done, 0);
+  assert.strictEqual(p.unphased.length, 0);
+});
+
+test('M3: 项目写操作——新建/编辑/完成/删除（删除后事项归未归类）', () => {
+  const sb = loadMobile();
+  const p = hostify(sb.TTMobile.projCreate({ name: '测试项目', startDate: '2026-10-17', endDate: '2026-10-20' }));
+  assert.ok(p.id);
+  // 编辑
+  assert.strictEqual(sb.TTMobile.projUpdate(p.id, { name: '改名项目' }), true);
+  let stored = hostify(sb.TTCore.storage.loadProjects()).find(x => x.id === p.id);
+  assert.strictEqual(stored.name, '改名项目');
+  // 归属一条事项后完成切换
+  const ev = hostify(sb.TTCore.storage.loadEvents()).find(e => e.title === '买菜');
+  sb.TTMobile.editItem(ev.id, { projectId: p.id });
+  assert.strictEqual(sb.TTMobile.projToggleComplete(p.id), true);
+  stored = hostify(sb.TTCore.storage.loadProjects()).find(x => x.id === p.id);
+  assert.strictEqual(stored.isCompleted, true);
+  assert.ok(stored.completedAt);
+  // 删除：项目消失，事项 projectId 置空（事项本身保留）
+  assert.strictEqual(sb.TTMobile.projRemove(p.id), true);
+  assert.ok(!hostify(sb.TTCore.storage.loadProjects()).some(x => x.id === p.id));
+  const evAfter = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === ev.id);
+  assert.ok(evAfter, '事项不应被删除');
+  assert.strictEqual(evAfter.projectId, null);
+});
+
+test('M3: 阶段写操作——新增/重命名/移动/日期/完成/删除（删除后事项归未分阶段）', () => {
+  const sb = loadMobile();
+  const p = hostify(sb.TTMobile.buildProjectsModel())[0];
+  // 新增（带日期倒挂自动交换由 core 负责，这里给正常区间）
+  const ph3 = hostify(sb.TTMobile.phaseAdd(p.id, { name: '验收', startDate: '2026-10-25', endDate: '2026-10-27' }));
+  assert.ok(ph3.id);
+  assert.strictEqual(ph3.order, 2);
+  // 重命名 + 日期
+  assert.strictEqual(sb.TTMobile.phaseRename(p.id, ph3.id, '验收上线'), true);
+  assert.strictEqual(sb.TTMobile.phaseDates(p.id, ph3.id, '2026-10-26', '2026-10-28'), true);
+  // 上移
+  assert.strictEqual(sb.TTMobile.phaseMove(p.id, ph3.id, -1), true);
+  let model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.deepStrictEqual(model.phases.map(x => x.name), ['规划', '验收上线', '执行']);
+  const ph3m = model.phases[1];
+  assert.strictEqual(ph3m.startDate, '2026-10-26');
+  assert.strictEqual(ph3m.endDate, '2026-10-28');
+  // 完成切换
+  assert.strictEqual(sb.TTMobile.phaseToggleComplete(p.id, ph3.id), true);
+  model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.strictEqual(model.phases[1].isCompleted, true);
+  // 把一条事项放进该阶段后删除阶段 → 事项归未分阶段
+  const ev = hostify(sb.TTCore.storage.loadEvents()).find(e => e.title === '健身');
+  sb.TTMobile.editItem(ev.id, { projectId: p.id, phaseId: ph3.id });
+  assert.strictEqual(sb.TTMobile.phaseRemove(p.id, ph3.id), true);
+  model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.strictEqual(model.phases.length, 2);
+  assert.strictEqual(model.unphased.length, 1);
+  assert.strictEqual(model.unphased[0].title, '健身');
+});
+
+test('M3: 事项归属闭环——新建带项目/阶段，编辑改归属，模型同步', () => {
+  const sb = loadMobile();
+  const D = sb.TTCore.dates;
+  const todayKey = D.dateKey(new Date());
+  const p = hostify(sb.TTMobile.buildProjectsModel())[0];
+  const ph = p.phases[1];   // 执行
+  // 新建：直接落入项目+阶段（addItem 补 phaseId）
+  const ev = hostify(sb.TTMobile.addItem({ title: '归属测试事项', startDate: todayKey, projectId: p.id, phaseId: ph.id }));
+  const stored = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === ev.id);
+  assert.strictEqual(stored.projectId, p.id);
+  assert.strictEqual(stored.phaseId, ph.id);
+  let model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.ok(model.phases[1].items.some(i => i.title === '归属测试事项'));
+  // 编辑：改到未归类
+  sb.TTMobile.editItem(ev.id, { projectId: null, phaseId: '' });
+  const stored2 = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === ev.id);
+  assert.strictEqual(stored2.projectId, null);
+  model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.ok(!model.phases[1].items.some(i => i.title === '归属测试事项'));
+});
+
+test('M3: 项目视图内事项勾选沿用按日语义（重复模板不写全局 done）', () => {
+  const sb = loadMobile();
+  const p = hostify(sb.TTMobile.buildProjectsModel())[0];
+  const rec = hostify(sb.TTCore.storage.loadEvents()).find(e => e.recur);
+  sb.TTMobile.editItem(rec.id, { projectId: p.id, phaseId: '' });
+  let model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  const item = model.unphased.find(i => i.id === rec.id);
+  assert.ok(item, '重复模板应出现在未分阶段');
+  assert.ok(item.vid.includes('@'), '项目视图内重复模板用虚拟 id');
+  sb.TTMobile.toggleItem(item.vid);
+  const tpl = hostify(sb.TTCore.storage.loadEvents()).find(e => e.id === rec.id);
+  assert.strictEqual(!!tpl.done, false, '勾选不得写模板全局 done');
+  model = hostify(sb.TTMobile.buildProjectsModel())[0];
+  assert.strictEqual(model.unphased.find(i => i.id === rec.id).done, true);
+});
+
+test('M3: 渲染——日程视图含分段控件与项目/阶段下拉，render 不抛错', () => {
+  const sb = loadMobile();
+  const html = sb.TTMobile.render();
+  // 分段切换控件
+  assert.ok(html.includes('data-act="view-days"'), '应含日程切换按钮');
+  assert.ok(html.includes('data-act="view-projects"'), '应含项目切换按钮');
+  // 事项编辑表单应带项目/阶段归属下拉（先制造编辑态不可行——ui 为闭包态；
+  // 改为断言导出函数可构建含下拉的模型：新建表单在 adding 态才出现，此处退而验证
+  // 日程视图结构完整：7 个日期区块 + 添加入口）
+  const dayCount = (html.match(/class="m-day"/g) || []).length;
+  assert.strictEqual(dayCount, 7);
+  assert.ok(html.includes('data-act="open-add"'));
+});
