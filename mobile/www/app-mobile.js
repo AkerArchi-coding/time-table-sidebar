@@ -141,6 +141,65 @@
     });
   }
 
+  // ---------- M4 纯逻辑：甘特图概览模型（可无 DOM 测试） ----------
+  const GANTT_CELL = 30;   // 每天格宽（px）
+  // 行：项目条（无日期用事项范围推导）→ 阶段条(depth1) → 多日事项条(depth1/2)；
+  // 未归类多日事项归入底部「未归类」组；单日事项与重复模板不进甘特。
+  function buildGanttModel(winStartKey, winDays) {
+    winDays = winDays || 31;
+    const winEnd = D().addDaysKey(winStartKey, winDays - 1);
+    const dayDiff = (a, b) => Math.round((D().parseDateKey(a) - D().parseDateKey(b)) / 86400000);
+    const clip = (s, e) => {   // 跨度裁剪到窗口；越界 null，否则 { off, len }
+      if (!s || !e || e < winStartKey || s > winEnd) return null;
+      const cs = s < winStartKey ? winStartKey : s;
+      const ce = e > winEnd ? winEnd : e;
+      return { off: dayDiff(cs, winStartKey), len: dayDiff(ce, cs) + 1 };
+    };
+    const C = TTCore.constants;
+    const events = TTCore.storage.loadEvents();
+    const rows = [];
+    const isMulti = (e) => !e.recur && D().eventEnd(e) > D().eventStart(e);
+    const multiRow = (ev, depth) => {
+      const c = clip(D().eventStart(ev), D().eventEnd(ev));
+      return c ? { kind: 'multi', id: ev.id, label: ev.title || '(无标题)', depth, done: !!ev.done,
+        start: D().eventStart(ev), end: D().eventEnd(ev), off: c.off, len: c.len } : null;
+    };
+    for (const p of TTCore.storage.loadProjects()) {
+      let s = p.startDate || '', e = p.endDate || '';
+      if (!s || !e) {
+        const evs = events.filter(x => x.projectId === p.id);
+        if (!evs.length) continue;
+        s = s || evs.map(x => D().eventStart(x)).sort()[0];
+        e = e || evs.map(x => D().eventEnd(x)).sort().slice(-1)[0];
+      }
+      const span = clip(s, e);
+      const childRows = [];
+      for (const ph of (p.phases || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0))) {
+        const c = clip(ph.startDate || '', ph.endDate || '');
+        if (c) childRows.push({ kind: 'phase', id: ph.id, label: ph.name || '(未命名阶段)', depth: 1,
+          done: !!ph.isCompleted, start: ph.startDate, end: ph.endDate, off: c.off, len: c.len });
+      }
+      for (const ev of events.filter(x => x.projectId === p.id && isMulti(x))) {
+        const r = multiRow(ev, ev.phaseId ? 2 : 1);
+        if (r) childRows.push(r);
+      }
+      if (!span && !childRows.length) continue;
+      if (span) rows.push({ kind: 'project', id: p.id, label: p.name || '(未命名项目)', depth: 0,
+        done: !!p.isCompleted, start: s, end: e,
+        color: (C.CATEGORIES[p.category] || C.CATEGORIES.work).color, off: span.off, len: span.len });
+      rows.push(...childRows);
+    }
+    const unRows = events.filter(e => isMulti(e) && !e.projectId).map(ev => multiRow(ev, 1)).filter(Boolean);
+    if (unRows.length) rows.push({ kind: 'group', id: '', label: '未归类', depth: 0 }, ...unRows);
+    const days = [];
+    for (let i = 0; i < winDays; i++) {
+      const k = D().addDaysKey(winStartKey, i);
+      const d = D().parseDateKey(k);
+      days.push({ key: k, label: (d.getMonth() + 1) + '/' + d.getDate(), wd: '周' + WEEKDAY_CN[d.getDay()] });
+    }
+    return { winStart: winStartKey, winDays, days, rows, todayOff: dayDiff(D().dateKey(new Date()), winStartKey) };
+  }
+
   // ---------- 写操作薄封装（委托 core，便于测试与统一入口） ----------
   function toggleItem(vid) { return TTCore.opsTasks.toggleDone(vid); }
   function addItem(fields) {
@@ -353,12 +412,53 @@
       `<button class="m-btn" data-act="cancel">取消</button></li>`;
   }
 
+  // ---------- M4：甘特图概览视图 HTML ----------
+  function ganttViewHtml() {
+    if (!ui.ganttStart) ui.ganttStart = D().addDaysKey(D().dateKey(new Date()), -3);
+    const m = buildGanttModel(ui.ganttStart, 31);
+    const trackW = m.winDays * GANTT_CELL;
+    let html = '<section class="m-gantt-wrap">';
+    html += `<div class="m-gantt-ctl">` +
+      `<button class="m-mini" data-act="gantt-prev">‹ 前四周</button>` +
+      `<span class="m-gantt-range">${esc(m.days[0].label)} ~ ${esc(m.days[m.winDays - 1].label)}</span>` +
+      `<button class="m-mini" data-act="gantt-today">回到今天</button>` +
+      `<button class="m-mini" data-act="gantt-next">后四周 ›</button></div>`;
+    html += `<div class="m-gantt"><div class="m-g-grid" style="width:${96 + trackW}px">`;
+    if (m.todayOff >= 0 && m.todayOff < m.winDays) {
+      html += `<div class="m-g-todayline" style="left:${96 + m.todayOff * GANTT_CELL + GANTT_CELL / 2}px"></div>`;
+    }
+    html += `<div class="m-g-row m-g-head"><div class="m-g-label"></div><div class="m-g-track" style="width:${trackW}px">`;
+    m.days.forEach((d, i) => {
+      html += `<div class="m-g-cell${i === m.todayOff ? ' today' : ''}" style="left:${i * GANTT_CELL}px"><b>${esc(d.label)}</b><i>${esc(d.wd)}</i></div>`;
+    });
+    html += '</div></div>';
+    const BAR_COLOR = { phase: '#5b8dd9', multi: '#8a6fd0' };
+    for (const r of m.rows) {
+      if (r.kind === 'group') {
+        html += `<div class="m-g-row m-g-group"><div class="m-g-label">${esc(r.label)}</div><div class="m-g-track" style="width:${trackW}px"></div></div>`;
+        continue;
+      }
+      const color = r.kind === 'project' ? (r.color || '#5b8dd9') : BAR_COLOR[r.kind];
+      html += `<div class="m-g-row">` +
+        `<div class="m-g-label" style="padding-left:${6 + r.depth * 12}px">${esc(r.label)}</div>` +
+        `<div class="m-g-track" style="width:${trackW}px">` +
+        `<div class="m-g-bar ${r.kind}${r.done ? ' done' : ''}" data-act="gantt-bar" data-label="${esc(r.label)}"` +
+        ` data-range="${esc(r.start)} ~ ${esc(r.end)}"` +
+        ` style="left:${r.off * GANTT_CELL + 1}px;width:${r.len * GANTT_CELL - 2}px;background:${color}"></div>` +
+        `</div></div>`;
+    }
+    if (!m.rows.length) html += '<div class="m-empty">窗口内无项目或多日事项</div>';
+    html += '</div></div></section>';
+    return html;
+  }
+
   // 渲染态：日程视图（editing/confirming/adding）+ 项目视图（projOpen/projForm/projConfirm/phaseForm/phaseConfirm）
   const ui = {
     view: 'days',
     editing: null, confirming: null, adding: null,
     projOpen: null, projForm: null, projConfirm: null,
-    phaseForm: null, phaseConfirm: null
+    phaseForm: null, phaseConfirm: null,
+    ganttStart: null   // M4：甘特窗口起点（null = 今天-3）
   };
 
   function clearTransient() {
@@ -372,6 +472,7 @@
       `<div class="m-seg">` +
       `<button data-act="view-days"${ui.view === 'days' ? ' class="on"' : ''}>日程</button>` +
       `<button data-act="view-projects"${ui.view === 'projects' ? ' class="on"' : ''}>项目</button>` +
+      `<button data-act="view-gantt"${ui.view === 'gantt' ? ' class="on"' : ''}>概览</button>` +
       `</div></header>`;
   }
 
@@ -423,7 +524,7 @@
 
   function render() {
     const rootEl = document.getElementById('app');
-    const html = headerHtml() + (ui.view === 'projects' ? projectsViewHtml() : daysViewHtml());
+    const html = headerHtml() + (ui.view === 'projects' ? projectsViewHtml() : ui.view === 'gantt' ? ganttViewHtml() : daysViewHtml());
     if (rootEl) rootEl.innerHTML = html;
     return html;   // 返回渲染串供沙箱测试断言
   }
@@ -487,10 +588,27 @@
       const act = actEl.dataset.act;
 
       // ---------- 视图切换 ----------
-      if (act === 'view-days' || act === 'view-projects') {
-        ui.view = act === 'view-days' ? 'days' : 'projects';
+      if (act === 'view-days' || act === 'view-projects' || act === 'view-gantt') {
+        ui.view = act === 'view-days' ? 'days' : act === 'view-projects' ? 'projects' : 'gantt';
         clearTransient();
         render();
+        return;
+      }
+
+      // ---------- 甘特图概览（M4，只读） ----------
+      if (act === 'gantt-prev' || act === 'gantt-next') {
+        const base = ui.ganttStart || D().addDaysKey(D().dateKey(new Date()), -3);
+        ui.ganttStart = D().addDaysKey(base, act === 'gantt-prev' ? -28 : 28);
+        render();
+        return;
+      }
+      if (act === 'gantt-today') {
+        ui.ganttStart = null;
+        render();
+        return;
+      }
+      if (act === 'gantt-bar') {
+        TTPlatform.toast(actEl.dataset.label + '：' + actEl.dataset.range);
         return;
       }
 
@@ -761,7 +879,7 @@
 
   root.TTMobile = {
     seedIfEmpty, seedProjectsIfEmpty,
-    collectDayItems, buildWeekModel, buildProjectsModel,
+    collectDayItems, buildWeekModel, buildProjectsModel, buildGanttModel,
     toggleItem, addItem, editItem, deleteItem,
     projCreate, projUpdate, projRemove, projToggleComplete,
     phaseAdd, phaseRename, phaseMove, phaseDates, phaseToggleComplete, phaseRemove,

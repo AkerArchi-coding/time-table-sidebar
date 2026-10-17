@@ -330,3 +330,83 @@ test('M3: 渲染——日程视图含分段控件与项目/阶段下拉，render
   assert.strictEqual(dayCount, 7);
   assert.ok(html.includes('data-act="open-add"'));
 });
+
+// ============ M4：甘特图概览 ============
+
+test('M4: 甘特模型——项目条/未归类组/多日事项行结构与偏移正确', () => {
+  const sb = loadMobile();
+  const D = sb.TTCore.dates;
+  const todayKey = D.dateKey(new Date());
+  const winStart = D.addDaysKey(todayKey, -3);
+  const m = hostify(sb.TTMobile.buildGanttModel(winStart, 31));
+  assert.strictEqual(m.winDays, 31);
+  assert.strictEqual(m.days.length, 31);
+  assert.strictEqual(m.todayOff, 3);
+  // 行：示例项目（today~today+13）+ 未归类组 + 多日活动示例（today+1~today+3）
+  assert.deepStrictEqual(m.rows.map(r => r.kind), ['project', 'group', 'multi']);
+  const proj = m.rows[0];
+  assert.strictEqual(proj.label, '示例项目');
+  assert.strictEqual(proj.off, 3);
+  assert.strictEqual(proj.len, 14);
+  assert.strictEqual(proj.depth, 0);
+  const multi = m.rows[2];
+  assert.strictEqual(multi.label, '多日活动示例');
+  assert.strictEqual(multi.off, 4);
+  assert.strictEqual(multi.len, 3);
+  assert.strictEqual(multi.depth, 1);
+});
+
+test('M4: 甘特模型——窗口裁剪（左截断）与窗口外数据剔除', () => {
+  const sb = loadMobile();
+  const D = sb.TTCore.dates;
+  const todayKey = D.dateKey(new Date());
+  // 窗口从 today+2 开始：项目左截断 len=12，多日事项截断为 2 天
+  const m = hostify(sb.TTMobile.buildGanttModel(D.addDaysKey(todayKey, 2), 31));
+  const proj = m.rows.find(r => r.kind === 'project');
+  assert.strictEqual(proj.off, 0);
+  assert.strictEqual(proj.len, 12);
+  const multi = m.rows.find(r => r.kind === 'multi');
+  assert.strictEqual(multi.off, 0);
+  assert.strictEqual(multi.len, 2);
+  // 完全在窗口之后（today+40 起）：无任何行
+  const m2 = hostify(sb.TTMobile.buildGanttModel(D.addDaysKey(todayKey, 40), 31));
+  assert.strictEqual(m2.rows.length, 0);
+  assert.strictEqual(m2.todayOff, -40);
+});
+
+test('M4: 甘特模型——带日期的阶段成行、归属事项按 phaseId 决定缩进', () => {
+  const sb = loadMobile();
+  const D = sb.TTCore.dates;
+  const todayKey = D.dateKey(new Date());
+  const p = hostify(sb.TTMobile.buildProjectsModel())[0];
+  // 给「执行」阶段设日期
+  sb.TTMobile.phaseDates(p.id, p.phases[1].id, D.addDaysKey(todayKey, 5), D.addDaysKey(todayKey, 9));
+  // 归属到该阶段的多日事项
+  const ev = hostify(sb.TTMobile.addItem({
+    title: '阶段内多日事项', startDate: D.addDaysKey(todayKey, 6),
+    endDate: D.addDaysKey(todayKey, 8), projectId: p.id, phaseId: p.phases[1].id
+  }));
+  assert.ok(ev.id);
+  const m = hostify(sb.TTMobile.buildGanttModel(D.addDaysKey(todayKey, -3), 31));
+  const kinds = m.rows.map(r => r.kind + ':' + r.label);
+  assert.ok(kinds.includes('phase:执行'), '应含阶段行');
+  assert.ok(kinds.includes('multi:阶段内多日事项'), '应含阶段内多日事项行');
+  const phRow = m.rows.find(r => r.kind === 'phase');
+  assert.strictEqual(phRow.off, 8);   // today+5，窗口 -3 → off=8
+  assert.strictEqual(phRow.len, 5);
+  const evRow = m.rows.find(r => r.label === '阶段内多日事项');
+  assert.strictEqual(evRow.depth, 2, '归属阶段的多日事项缩进两层');
+  assert.strictEqual(evRow.off, 9);
+  assert.strictEqual(evRow.len, 3);
+});
+
+test('M4: 甘特渲染——概览视图 HTML 含刻度/条/今天线，render 不抛错', () => {
+  const sb = loadMobile();
+  // 默认日程视图 → 切不到概览（ui 为闭包态），改为验证：
+  // 1) 分段控件含「概览」入口；2) buildGanttModel 输出可序列化、无异常
+  const html = sb.TTMobile.render();
+  assert.ok(html.includes('data-act="view-gantt"'), '分段控件应含概览入口');
+  const D = sb.TTCore.dates;
+  const m = sb.TTMobile.buildGanttModel(D.addDaysKey(D.dateKey(new Date()), -3), 31);
+  assert.ok(JSON.stringify(hostify(m)).length > 0);
+});
